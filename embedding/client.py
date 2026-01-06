@@ -15,7 +15,7 @@ import os
 
 from openai import OpenAI, AsyncOpenAI
 
-from config import AppConfig, EmbeddingConfig
+from ..config import AppConfig, EmbeddingConfig
 
 
 Vector = List[float]

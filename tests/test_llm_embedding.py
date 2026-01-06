@@ -3,19 +3,21 @@
 测试脚本：验证 LLM 和 Embedding 调用是否正常工作
 
 使用方法：
-    python test_llm_embedding.py
+    python tests/test_llm_embedding.py
+    或
+    cd tests && python test_llm_embedding.py
 """
 
 import sys
 from pathlib import Path
 
 # 添加项目根目录到路径
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config import AppConfig
-from llm_client import LLMClient
-from embedding_client import EmbeddingClient
+from llm import LLMClient
+from embedding import EmbeddingClient
 
 
 def test_config_loading():

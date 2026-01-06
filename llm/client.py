@@ -23,7 +23,7 @@ import os
 
 from openai import OpenAI, AsyncOpenAI
 
-from config import AppConfig, LLMConfig
+from ..config import AppConfig, LLMConfig
 
 
 Message = Dict[str, str]  # {"role": "user" | "assistant" | "system", "content": "..."}

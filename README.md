@@ -19,20 +19,28 @@
 
 ### 目录结构（当前）
 
-**核心模块：**
-- `config.py`：读取 .env 文件或环境变量，统一管理 LLM、Embedding 和存储路径
-- `llm_client.py`：封装 LLM 调用（**对齐 RAGFlow，使用 OpenAI SDK**）
-- `embedding_client.py`：封装 Embedding 调用（**对齐 RAGFlow，使用 OpenAI SDK**）
-- `vector_store.py`：向量存储与检索（**使用 Milvus Lite，参考 cloud-edge-milk-tea-agent**）
-
-**配置文件：**
-- `requirements.txt`：项目依赖
-- `.env.example`：环境变量配置模板（**复制为 `.env` 并填入你的 API Key**）
-- `.gitignore`：已配置忽略 `.env` 文件，不会提交到 git
-
-**测试脚本：**
-- `test_llm_embedding.py`：测试 LLM 和 Embedding 调用
-- `test_vector_store.py`：测试向量存储功能
+```
+rag_engine/
+├── config/                  # 配置模块
+│   ├── __init__.py
+│   └── config.py           # 统一管理 LLM、Embedding 和存储路径
+├── llm/                     # LLM 模块
+│   ├── __init__.py
+│   └── client.py          # LLM 客户端（对齐 RAGFlow，使用 OpenAI SDK）
+├── embedding/               # Embedding 模块
+│   ├── __init__.py
+│   └── client.py          # Embedding 客户端（对齐 RAGFlow，使用 OpenAI SDK）
+├── vector_store/            # 向量存储模块
+│   ├── __init__.py
+│   └── store.py           # 向量存储与检索（使用 Milvus Lite）
+├── tests/                   # 测试文件
+│   ├── test_llm_embedding.py
+│   └── test_vector_store.py
+├── requirements.txt         # 项目依赖
+├── .env.example            # 环境变量配置模板
+├── .gitignore              # Git 忽略文件
+└── README.md               # 项目说明
+```
 
 ### 实现方式说明
 
@@ -111,7 +119,7 @@ export RAG_EMBEDDING_MODEL="text-embedding-v3"
 
 ```bash
 # 运行向量存储测试
-python test_vector_store.py
+python tests/test_vector_store.py
 ```
 
 测试脚本会自动：
@@ -126,7 +134,7 @@ python test_vector_store.py
 
 ```bash
 # 运行测试脚本
-python test_llm_embedding.py
+python tests/test_llm_embedding.py
 ```
 
 测试脚本会自动验证：
@@ -139,8 +147,8 @@ python test_llm_embedding.py
 
 ```python
 from config import AppConfig
-from llm_client import LLMClient
-from embedding_client import EmbeddingClient
+from llm import LLMClient
+from embedding import EmbeddingClient
 
 # 加载配置（自动从 .env 文件或环境变量读取）
 config = AppConfig.load()

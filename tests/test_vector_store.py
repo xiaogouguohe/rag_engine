@@ -3,18 +3,20 @@
 测试脚本：验证向量存储功能
 
 使用方法：
-    python test_vector_store.py
+    python tests/test_vector_store.py
+    或
+    cd tests && python test_vector_store.py
 """
 
 import sys
 from pathlib import Path
 
 # 添加项目根目录到路径
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from config import AppConfig
-from embedding_client import EmbeddingClient
+from embedding import EmbeddingClient
 from vector_store import VectorStore
 
 
