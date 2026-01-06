@@ -11,11 +11,13 @@
 - ✅ 统一的配置管理（模型名称、API Key、Base URL 等）
 - ✅ **向量存储与检索**（使用 Milvus Lite，参考 cloud-edge-milk-tea-agent）
 - ✅ **文档解析与分块**（支持 TXT、Markdown，使用 Python 标准库）
+- ✅ **完整的 RAG 引擎**（整合所有模块，实现文档处理和问答流程）
 
 后续阶段（可逐步实现）：
 
-- 完整的 RAG 问答流程（整合所有模块）
 - 终端交互体验 / 简单 CLI
+- 支持更多文档格式（PDF、DOCX 等）
+- 高级检索策略（混合检索、重排序等）
 
 ### 目录结构（当前）
 
@@ -37,10 +39,14 @@ rag_engine/
 │   ├── __init__.py
 │   ├── parser.py          # 文档解析器（支持 TXT、Markdown）
 │   └── chunker.py         # 文本分块器（固定大小 + 重叠窗口）
+├── rag/                    # RAG 引擎模块
+│   ├── __init__.py
+│   └── engine.py          # RAG 引擎核心（整合所有模块）
 ├── tests/                   # 测试文件
 │   ├── test_llm_embedding.py
 │   ├── test_vector_store.py
-│   └── test_document.py
+│   ├── test_document.py
+│   └── test_rag_engine.py
 ├── requirements.txt         # 项目依赖
 ├── .env.example            # 环境变量配置模板
 ├── .gitignore              # Git 忽略文件
@@ -198,5 +204,39 @@ print(f"向量维度: {len(vecs[0])}, 向量数量: {len(vecs)}")
 - 请勿将包含真实 API Key 的 `.env` 文件提交到代码仓库
 - 使用 `.env.example` 作为模板，团队成员可以复制并填入自己的配置
 
-后续模块（文档解析、索引、检索等）可以在此基础上逐步补充。
+### 使用示例（完整 RAG 流程）
+
+```python
+from rag import RAGEngine
+
+# 初始化引擎
+engine = RAGEngine(kb_id="my_knowledge_base")
+
+# 1. 处理文档（解析 → 分块 → 向量化 → 存储）
+result = engine.ingest_document("example.txt")
+print(f"文档处理完成，共 {result['chunks_count']} 个块")
+
+# 2. 问答（问题 → 向量化 → 检索 → 生成回答）
+answer = engine.query("什么是 RAG？", top_k=5)
+print(f"回答: {answer['answer']}")
+print(f"参考了 {len(answer['sources'])} 个文档片段")
+
+# 3. 查看统计信息
+stats = engine.get_stats()
+print(f"知识库中有 {stats['vector_count']} 个向量")
+```
+
+### 完整流程说明
+
+**文档处理流程：**
+```
+文档文件 → Parser → 文本内容 → Chunker → 文本块 → Embedding → 向量 → VectorStore → 存储
+```
+
+**问答流程：**
+```
+用户问题 → Embedding → 查询向量 → VectorStore → 检索相关块 → 拼接上下文 → LLM → 生成回答
+```
+
+现在你有了一个完整的、可用的 RAG 系统！
 
