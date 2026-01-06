@@ -10,11 +10,11 @@
 - ✅ 搭建 **LLM 调用层** 和 **Embedding 调用层**
 - ✅ 统一的配置管理（模型名称、API Key、Base URL 等）
 - ✅ **向量存储与检索**（使用 Milvus Lite，参考 cloud-edge-milk-tea-agent）
+- ✅ **文档解析与分块**（支持 TXT、Markdown，使用 Python 标准库）
 
 后续阶段（可逐步实现）：
 
-- 文档解析与分块
-- 完整的 RAG 问答流程
+- 完整的 RAG 问答流程（整合所有模块）
 - 终端交互体验 / 简单 CLI
 
 ### 目录结构（当前）
@@ -33,9 +33,14 @@ rag_engine/
 ├── vector_store/            # 向量存储模块
 │   ├── __init__.py
 │   └── store.py           # 向量存储与检索（使用 Milvus Lite）
+├── document/                # 文档处理模块
+│   ├── __init__.py
+│   ├── parser.py          # 文档解析器（支持 TXT、Markdown）
+│   └── chunker.py         # 文本分块器（固定大小 + 重叠窗口）
 ├── tests/                   # 测试文件
 │   ├── test_llm_embedding.py
-│   └── test_vector_store.py
+│   ├── test_vector_store.py
+│   └── test_document.py
 ├── requirements.txt         # 项目依赖
 ├── .env.example            # 环境变量配置模板
 ├── .gitignore              # Git 忽略文件
@@ -114,6 +119,20 @@ export RAG_EMBEDDING_MODEL="text-embedding-v3"
 - 参考 `.env.example` 查看所有可配置项
 
 3. 验证功能是否正常：
+
+**测试文档解析和分块：**
+
+```bash
+# 运行文档解析和分块测试
+python tests/test_document.py
+```
+
+测试脚本会自动：
+- ✅ 测试 TXT 文件解析
+- ✅ 测试 Markdown 文件解析
+- ✅ 测试文本分块功能
+- ✅ 测试带元数据的分块
+- ✅ 测试完整流程（解析 + 分块）
 
 **测试向量存储功能：**
 
