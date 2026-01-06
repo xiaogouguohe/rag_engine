@@ -16,7 +16,12 @@ from typing import List, Dict, Any, Optional
 import uuid
 
 from config import AppConfig
-from document import DocumentParser, TextChunker
+from document import (
+    ParserFactory,
+    TextChunker,
+    MetadataEnhancer,
+    DataPreparationModule,
+)
 from embedding import EmbeddingClient
 from llm import LLMClient
 from vector_store import VectorStore
@@ -37,6 +42,8 @@ class RAGEngine:
         config: Optional[AppConfig] = None,
         chunk_size: int = 500,
         chunk_overlap: int = 50,
+        use_markdown_header_split: bool = True,
+        metadata_enhancer: Optional[MetadataEnhancer] = None,
     ):
         """
         初始化 RAG 引擎。
@@ -46,6 +53,8 @@ class RAGEngine:
             config: 应用配置（如果不提供，则自动加载）
             chunk_size: 分块大小（字符数）
             chunk_overlap: 分块重叠大小（字符数）
+            use_markdown_header_split: 是否对 Markdown 使用标题分割（参考 C8）
+            metadata_enhancer: 元数据增强器（可选）
         """
         self.kb_id = kb_id
         
@@ -55,10 +64,9 @@ class RAGEngine:
         self.config = config
         
         # 初始化各个组件
-        self.parser = DocumentParser()
-        self.chunker = TextChunker(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
+        self.data_module = DataPreparationModule(
+            metadata_enhancer=metadata_enhancer,
+            use_markdown_header_split=use_markdown_header_split,
         )
         self.embedding_client = EmbeddingClient.from_config(config)
         self.llm_client = LLMClient.from_config(config)
@@ -68,15 +76,13 @@ class RAGEngine:
         self,
         file_path: str | Path,
         doc_id: Optional[str] = None,
-        file_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        处理文档：解析 → 分块 → 向量化 → 存储
+        处理文档：解析 → 分块 → 向量化 → 存储（参考 C8 的实现）。
         
         Args:
             file_path: 文档文件路径
             doc_id: 文档 ID（如果不提供，则自动生成）
-            file_type: 文件类型（可选，自动识别）
         
         Returns:
             处理结果：
@@ -91,38 +97,41 @@ class RAGEngine:
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
         
-        # 生成文档 ID
-        if doc_id is None:
-            doc_id = f"doc_{uuid.uuid4().hex[:8]}"
+        # 1. 加载文档（会自动解析和分块，如果是 Markdown 且启用标题分割）
+        self.data_module.load_documents([file_path], enhance_metadata=True)
         
-        # 1. 解析文档
-        doc = self.parser.parse(file_path, file_type=file_type)
-        content = doc['content']
+        # 2. 如果还没有分块，进行分块
+        if not self.data_module.chunks:
+            self.data_module.chunk_documents()
         
-        if not content.strip():
-            raise ValueError(f"文档内容为空: {file_path}")
+        # 3. 获取该文档的块（通过 parent_id 匹配）
+        # 找到刚加载的文档
+        parent_doc = None
+        for doc in self.data_module.documents:
+            if str(file_path) in doc.metadata.get("source", ""):
+                parent_doc = doc
+                break
         
-        # 2. 分块
-        chunks = self.chunker.chunk_document(
-            content,
-            metadata={
-                "doc_id": doc_id,
-                "file_name": doc['file_name'],
-                "file_type": doc['file_type'],
-            }
-        )
+        if not parent_doc:
+            raise ValueError(f"文档加载失败: {file_path}")
         
-        if not chunks:
+        parent_id = parent_doc.metadata.get("parent_id")
+        doc_chunks = [
+            chunk for chunk in self.data_module.chunks
+            if chunk.metadata.get("parent_id") == parent_id
+        ]
+        
+        if not doc_chunks:
             raise ValueError(f"文档分块失败: {file_path}")
         
-        # 3. 提取文本和元数据
-        texts = [chunk['text'] for chunk in chunks]
-        metadatas = [chunk['metadata'] for chunk in chunks]
+        # 4. 提取文本和元数据
+        texts = [chunk.page_content for chunk in doc_chunks]
+        metadatas = [chunk.metadata for chunk in doc_chunks]
         
-        # 4. 向量化
+        # 5. 向量化
         vectors = self.embedding_client.embed_texts(texts)
         
-        # 5. 存储到向量数据库
+        # 6. 存储到向量数据库
         chunk_ids = self.vector_store.add_texts(
             kb_id=self.kb_id,
             texts=texts,
@@ -131,8 +140,8 @@ class RAGEngine:
         )
         
         return {
-            "doc_id": doc_id,
-            "chunks_count": len(chunks),
+            "doc_id": parent_id,
+            "chunks_count": len(doc_chunks),
             "chunk_ids": chunk_ids,
             "status": "success",
         }
