@@ -50,6 +50,7 @@ class AppConfig:
 
     llm: LLMConfig
     embedding: EmbeddingConfig
+    storage_path: str = "./data/indices"  # 向量索引存储路径
 
     @classmethod
     def load(cls, *, env_prefix: str = "RAG_", env_file: Optional[str] = None) -> "AppConfig":
@@ -144,7 +145,9 @@ class AppConfig:
             timeout=float(_get("EMBEDDING_TIMEOUT", "60")),
         )
 
-        return cls(llm=llm_cfg, embedding=emb_cfg)
+        storage_path = _get("STORAGE_PATH", "./data/indices")
+
+        return cls(llm=llm_cfg, embedding=emb_cfg, storage_path=storage_path)
 
 
 __all__ = ["LLMConfig", "EmbeddingConfig", "AppConfig"]

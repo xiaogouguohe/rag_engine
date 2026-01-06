@@ -7,24 +7,32 @@
 
 当前阶段目标：
 
-- 搭建 **LLM 调用层** 和 **Embedding 调用层**
-- 统一的配置管理（模型名称、API Key、Base URL 等）
+- ✅ 搭建 **LLM 调用层** 和 **Embedding 调用层**
+- ✅ 统一的配置管理（模型名称、API Key、Base URL 等）
+- ✅ **向量存储与检索**（使用 Milvus Lite，参考 cloud-edge-milk-tea-agent）
 
 后续阶段（可逐步实现）：
 
 - 文档解析与分块
-- 向量存储与检索
 - 完整的 RAG 问答流程
 - 终端交互体验 / 简单 CLI
 
 ### 目录结构（当前）
 
-- `config.py`：读取 .env 文件或环境变量，统一管理 LLM 与 Embedding 参数
+**核心模块：**
+- `config.py`：读取 .env 文件或环境变量，统一管理 LLM、Embedding 和存储路径
 - `llm_client.py`：封装 LLM 调用（**对齐 RAGFlow，使用 OpenAI SDK**）
 - `embedding_client.py`：封装 Embedding 调用（**对齐 RAGFlow，使用 OpenAI SDK**）
+- `vector_store.py`：向量存储与检索（**使用 Milvus Lite，参考 cloud-edge-milk-tea-agent**）
+
+**配置文件：**
 - `requirements.txt`：项目依赖
 - `.env.example`：环境变量配置模板（**复制为 `.env` 并填入你的 API Key**）
 - `.gitignore`：已配置忽略 `.env` 文件，不会提交到 git
+
+**测试脚本：**
+- `test_llm_embedding.py`：测试 LLM 和 Embedding 调用
+- `test_vector_store.py`：测试向量存储功能
 
 ### 实现方式说明
 
@@ -97,7 +105,22 @@ export RAG_EMBEDDING_MODEL="text-embedding-v3"
 - `.env` 文件已被 `.gitignore` 忽略，不会提交到 git
 - 参考 `.env.example` 查看所有可配置项
 
-3. 验证配置和调用是否正常：
+3. 验证功能是否正常：
+
+**测试向量存储功能：**
+
+```bash
+# 运行向量存储测试
+python test_vector_store.py
+```
+
+测试脚本会自动：
+- ✅ 生成测试向量
+- ✅ 添加到向量存储
+- ✅ 测试相似度搜索
+- ✅ 验证持久化功能
+
+**测试 LLM 和 Embedding：**
 
 **方式一：使用测试脚本（推荐）**
 

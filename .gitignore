@@ -47,9 +47,12 @@ logs/
 *.temp
 .DS_Store
 
-# 向量数据库文件（后续会用到）
+# 向量数据库文件
 *.faiss
 *.index
 data/
 indices/
+# Milvus Lite 数据库文件
+*.db
+milvus_lite.db
 
