@@ -45,12 +45,23 @@ class EmbeddingConfig:
 
 
 @dataclass
+class KnowledgeBaseConfig:
+    """知识库配置"""
+    
+    kb_id: str
+    source_path: str  # 知识库源文件路径（如：../HowToCook/dishes）
+    file_pattern: str = "*.md"  # 文件匹配模式（默认：所有 .md 文件）
+    use_markdown_header_split: bool = True  # 是否使用 Markdown 标题分割
+
+
+@dataclass
 class AppConfig:
     """应用级配置入口，后续可以在这里挂更多字段（索引路径、日志等）"""
 
     llm: LLMConfig
     embedding: EmbeddingConfig
     storage_path: str = "./data/indices"  # 向量索引存储路径
+    knowledge_bases: Optional[List[KnowledgeBaseConfig]] = None  # 知识库配置列表
 
     @classmethod
     def load(cls, *, env_prefix: str = "RAG_", env_file: Optional[str] = None) -> "AppConfig":
@@ -146,9 +157,34 @@ class AppConfig:
         )
 
         storage_path = _get("STORAGE_PATH", "./data/indices")
+        
+        # 解析知识库配置（可选，格式：KB_ID:SOURCE_PATH:FILE_PATTERN）
+        # 例如：RECIPES_KB:../HowToCook/dishes:*.md
+        knowledge_bases = None
+        kb_config_str = _get("KNOWLEDGE_BASES")
+        if kb_config_str:
+            kb_configs = []
+            for kb_entry in kb_config_str.split(","):
+                parts = kb_entry.strip().split(":")
+                if len(parts) >= 2:
+                    kb_id = parts[0].strip()
+                    source_path = parts[1].strip()
+                    file_pattern = parts[2].strip() if len(parts) > 2 else "*.md"
+                    kb_configs.append(KnowledgeBaseConfig(
+                        kb_id=kb_id,
+                        source_path=source_path,
+                        file_pattern=file_pattern,
+                    ))
+            if kb_configs:
+                knowledge_bases = kb_configs
 
-        return cls(llm=llm_cfg, embedding=emb_cfg, storage_path=storage_path)
+        return cls(
+            llm=llm_cfg,
+            embedding=emb_cfg,
+            storage_path=storage_path,
+            knowledge_bases=knowledge_bases,
+        )
 
 
-__all__ = ["LLMConfig", "EmbeddingConfig", "AppConfig"]
+__all__ = ["LLMConfig", "EmbeddingConfig", "AppConfig", "KnowledgeBaseConfig"]
 

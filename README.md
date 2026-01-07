@@ -287,6 +287,59 @@ result = engine.ingest_document("document.md")
 # python main.py ingest --kb-id my_kb --file document.md
 ```
 
+### 从配置文件加载知识库（推荐）⭐
+
+**方式一：使用 JSON 配置文件（推荐）**
+
+1. 编辑 `knowledge_bases.json` 文件：
+
+```json
+{
+  "knowledge_bases": [
+    {
+      "kb_id": "recipes_kb",
+      "source_path": "../HowToCook/dishes",
+      "file_pattern": "*.md",
+      "use_markdown_header_split": true,
+      "description": "菜谱知识库"
+    }
+  ]
+}
+```
+
+2. 运行加载脚本：
+
+```bash
+# 加载所有配置的知识库
+python load_knowledge_bases.py
+
+# 只加载指定的知识库
+python load_knowledge_bases.py --kb-id recipes_kb
+```
+
+**方式二：使用环境变量**
+
+在 `.env` 文件中添加：
+
+```bash
+# 格式：KB_ID:SOURCE_PATH:FILE_PATTERN
+# 多个知识库用逗号分隔
+RAG_KNOWLEDGE_BASES=recipes_kb:../HowToCook/dishes:*.md
+```
+
+然后运行：
+
+```bash
+python load_knowledge_bases.py
+```
+
+**方式三：命令行指定路径**
+
+```bash
+# 使用启动脚本加载指定目录
+python load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
+```
+
 ### 从 GitHub 加载知识库示例
 
 如果你想从 GitHub 仓库加载大量文档（如菜谱知识库），可以使用专门的脚本：
@@ -298,8 +351,10 @@ result = engine.ingest_document("document.md")
 cd /Users/xiaogouguohe/workspace
 git clone https://github.com/Anduin2017/HowToCook.git
 
-# 2. 使用启动脚本加载所有 .md 文件
+# 2. 配置 knowledge_bases.json 或使用命令行
 cd rag_engine
+python load_knowledge_bases.py  # 从配置文件加载
+# 或
 python load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
 ```
 
