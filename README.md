@@ -374,5 +374,74 @@ python scripts/load_github_recipes.py --kb-id recipes_kb --github-url https://gi
 - 显示加载进度和统计信息
 - 支持 Markdown 标题分割（默认启用，适合菜谱结构）
 
+## RAG 系统评估标准
+
+RAG 系统的评估分为三个层次：
+
+### 1. 检索阶段评估指标
+
+- **召回率（Recall）**：检索到的相关文档块数量 / 所有相关文档块数量（最重要）
+- **精确率（Precision）**：检索到的相关文档块数量 / 检索到的所有文档块数量
+- **F1 分数**：召回率和精确率的调和平均数
+- **MRR（Mean Reciprocal Rank）**：平均倒数排名，衡量第一个相关文档块的平均排名
+- **NDCG（Normalized Discounted Cumulative Gain）**：归一化折损累积增益，考虑文档块的相关性程度和排名位置
+- **Hit Rate**：至少检索到一个相关文档块的查询比例
+
+### 2. 生成阶段评估指标
+
+- **忠实度（Faithfulness）**：生成的回答是否忠实于检索到的文档内容（防止幻觉）
+- **相关性（Relevance）**：生成的回答是否与问题相关
+- **BERTScore**：基于 BERT 嵌入的语义相似度
+
+### 3. 端到端评估指标
+
+- **答案准确性（Answer Accuracy）**：生成的回答是否正确的比例
+- **用户满意度（User Satisfaction）**：用户对系统回答的满意程度
+
+**详细说明**：请参考 `docs/rag_evaluation_metrics.md`
+
+### 自动生成评估数据集
+
+不想手动构造测试数据？可以使用脚本自动生成：
+
+```bash
+# 从配置文件的知识库生成评估数据集
+python generate_eval_dataset.py --kb-id recipes_kb --output eval_dataset.json
+
+# 指定知识库源路径
+python generate_eval_dataset.py --kb-id recipes_kb --source-path ../HowToCook/dishes --output eval_dataset.json
+
+# 快速测试（只处理前 10 个文档）
+python generate_eval_dataset.py --kb-id recipes_kb --max-docs 10 --output eval_dataset_test.json
+```
+
+脚本会自动：
+1. 扫描知识库中的所有 .md 文件
+2. 从文档中提取或生成问题（使用 LLM）
+3. 标注相关文档块（基于文档结构）
+4. 生成评估数据集（JSON 格式）
+
+生成的数据集格式：
+```json
+{
+  "kb_id": "recipes_kb",
+  "source_path": "../HowToCook/dishes",
+  "total_samples": 150,
+  "samples": [
+    {
+      "id": "uuid",
+      "question": "如何做西红柿鸡蛋？",
+      "source_document": "meat_dish/西红柿鸡蛋.md",
+      "parent_id": "doc_hash",
+      "relevant_chunks": ["doc_hash"],
+      "metadata": {
+        "file_name": "西红柿鸡蛋.md",
+        "file_path": "..."
+      }
+    }
+  ]
+}
+```
+
 现在你有了一个完整的、可用的 RAG 系统！
 
