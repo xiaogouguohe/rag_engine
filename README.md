@@ -400,6 +400,48 @@ RAG 系统的评估分为三个层次：
 
 **详细说明**：请参考 `docs/rag_evaluation_metrics.md`
 
+### 使用 RAGAS 生成和评估数据集（推荐）⭐
+
+RAGAS 是专门用于评估 RAG 系统的框架，提供更专业的评估指标。
+
+**安装 RAGAS**：
+```bash
+pip install ragas datasets
+```
+
+**生成评估数据集并评估**：
+```bash
+# 生成数据集并使用 RAGAS 评估
+python generate_ragas_dataset.py --kb-id recipes_kb --output ragas_dataset.json
+
+# 只生成数据集，不评估
+python generate_ragas_dataset.py --kb-id recipes_kb --output ragas_dataset.json --no-evaluate
+
+# 只评估已存在的数据集
+python generate_ragas_dataset.py --evaluate-only ragas_dataset.json
+```
+
+**RAGAS 评估指标**：
+- **Faithfulness（忠实度）**：生成的回答是否忠实于检索到的文档内容
+- **Answer Relevancy（回答相关性）**：生成的回答是否与问题相关
+- **Context Precision（上下文精确率）**：检索到的文档块是否相关
+- **Context Recall（上下文召回率）**：是否检索到了所有相关文档块
+
+**生成的数据集格式**：
+```json
+{
+  "kb_id": "recipes_kb",
+  "samples": [
+    {
+      "question": "如何做西红柿鸡蛋？",
+      "contexts": ["检索到的文档块1", "检索到的文档块2"],
+      "answer": "RAG 系统生成的回答",
+      "ground_truth": "标准答案（文档内容）"
+    }
+  ]
+}
+```
+
 ### 自动生成评估数据集
 
 不想手动构造测试数据？可以使用脚本自动生成：
