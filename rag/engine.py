@@ -236,6 +236,8 @@ class RAGEngine:
         return {
             "answer": answer,
             "sources": context_chunks,
+            # 向后兼容：有些评估脚本或上层会用 chunks 表示检索到的上下文块
+            "chunks": context_chunks,
             "query": question,
         }
     

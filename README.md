@@ -84,8 +84,15 @@ rag_engine/
 
 ```bash
 cd rag_engine
+
+# 使用默认源安装（可能较慢）
 pip install -r requirements.txt
+
+# 或使用国内镜像源加速（推荐）
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
+
+**加速提示**：如果下载速度慢，可以使用国内镜像源。详细说明请参考 `docs/installation_tips.md`
 
 2. 配置 API Key 和模型参数（两种方式任选其一）：
 

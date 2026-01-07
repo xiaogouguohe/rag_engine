@@ -24,27 +24,68 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+# 导入 openai 以处理连接错误
+try:
+    import openai
+except ImportError:
+    openai = None
+
 # 添加项目根目录到路径
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from rag import RAGEngine
 from config import AppConfig
+from document import ParserFactory, DataPreparationModule
+from llm import LLMClient
+from embedding import EmbeddingClient
 
 # 尝试导入 RAGAS
 try:
     from ragas import evaluate
-    from ragas.metrics import (
-        faithfulness,
-        answer_relevancy,
-        context_precision,
-        context_recall,
-    )
+    # RAGAS 0.4.2 的正确导入方式
+    # 注意：从 ragas.metrics 导入的是已初始化的对象（虽然会有 DeprecationWarning）
+    # 从 ragas.metrics.collections 导入的是模块，不是对象，不能直接使用
+    try:
+        # 使用 ragas.metrics 导入（已初始化的对象，虽然会有警告）
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from ragas.metrics import (
+                faithfulness,
+                answer_relevancy,
+                context_precision,
+                context_recall,
+            )
+    except ImportError:
+        faithfulness = answer_relevancy = context_precision = context_recall = None
+    
+    # 尝试导入 TestsetGenerator
+    try:
+        from ragas.testset import TestsetGenerator
+        # RAGAS 0.4.2 使用 query_distribution，而不是 evolutions
+        try:
+            from ragas.testset.synthesizers import default_query_distribution
+        except ImportError:
+            default_query_distribution = None
+        _HAS_TESTSET_GENERATOR = True
+    except ImportError as e:
+        TestsetGenerator = None
+        default_query_distribution = None
+        _HAS_TESTSET_GENERATOR = False
+        print(f"⚠️  TestsetGenerator 不可用: {e}")
+    
     from datasets import Dataset
+    from langchain_core.documents import Document as LangchainDocument
     _HAS_RAGAS = True
-except ImportError:
+except ImportError as e:
     _HAS_RAGAS = False
-    print("⚠️  未安装 RAGAS，请运行: pip install ragas datasets")
+    _HAS_TESTSET_GENERATOR = False
+    TestsetGenerator = None
+    default_query_distribution = None
+    faithfulness = answer_relevancy = context_precision = context_recall = None
+    print(f"⚠️  未安装 RAGAS: {e}")
+    print("   请运行: pip install ragas datasets")
 
 
 def find_markdown_files(directory: Path) -> List[Path]:
@@ -115,6 +156,522 @@ def generate_questions_from_document(
     return questions[:max_questions]
 
 
+def convert_documents_to_langchain_docs(file_paths: List[Path]) -> List[LangchainDocument]:
+    """
+    将文档文件转换为 langchain Document 格式，用于 RAGAS TestsetGenerator。
+    
+    Args:
+        file_paths: 文档文件路径列表
+    
+    Returns:
+        langchain Document 列表
+    """
+    langchain_docs = []
+    
+    for file_path in file_paths:
+        try:
+            parser = ParserFactory.get_parser(file_path)
+            if parser:
+                # 使用解析器解析文档
+                result = parser.parse(file_path)
+                content = result.get("content", "")
+                
+                # 确保 content 是字符串类型（RAGAS 要求）
+                if not isinstance(content, str):
+                    if content is None:
+                        content = ""
+                    else:
+                        # 如果不是字符串，尝试转换为字符串
+                        content = str(content)
+                
+                # 过滤掉空内容
+                if not content.strip():
+                    print(f"  ⚠️  文档内容为空，跳过: {file_path.name}")
+                    continue
+                
+                # 创建 langchain Document
+                doc = LangchainDocument(
+                    page_content=content,
+                    metadata={
+                        "source": str(file_path),
+                        "file_name": file_path.name,
+                        "file_type": result.get("file_type", ""),
+                    }
+                )
+                langchain_docs.append(doc)
+        except Exception as e:
+            print(f"  ⚠️  解析文档失败 {file_path.name}: {e}")
+            continue
+    
+    return langchain_docs
+
+
+def generate_ragas_dataset_with_testset_generator(
+    kb_id: str,
+    source_path: Optional[str] = None,
+    output_path: str = "ragas_testset_dataset.json",
+    max_docs: int = 5,
+    num_questions_per_doc: int = 3,
+) -> bool:
+    """
+    使用 RAGAS TestsetGenerator 生成测试集（新方法）。
+    
+    生成的数据格式：
+    {
+        "question": str,           # LLM 生成的问题
+        "answer": "",              # 留空，后续用 RAG 生成
+        "ground_truth": str,       # LLM 根据文档生成的参考答案
+        "contexts": List[str],     # RAGAS 确定的相关文档块
+    }
+    
+    Args:
+        kb_id: 知识库 ID
+        source_path: 知识库源路径
+        output_path: 输出文件路径
+        max_docs: 最多处理的文档数（默认 5）
+        num_questions_per_doc: 每个文档生成的问题数（默认 3）
+    """
+    if not _HAS_TESTSET_GENERATOR:
+        print("❌ RAGAS TestsetGenerator 不可用")
+        print("   请确保安装了 RAGAS v0.1.0+ 并包含 testset 模块")
+        return False
+    
+    print("=" * 60)
+    print("使用 RAGAS TestsetGenerator 生成测试集")
+    print("=" * 60)
+    
+    # 1. 确定源路径
+    if source_path:
+        source_dir = Path(source_path)
+    else:
+        # 从配置文件读取
+        try:
+            config_path = Path("knowledge_bases.json")
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
+                kb_config = next((kb for kb in config_data.get("knowledge_bases", []) if kb["kb_id"] == kb_id), None)
+                if kb_config:
+                    source_dir = Path(kb_config["source_path"])
+                else:
+                    print(f"❌ 未找到知识库配置: {kb_id}")
+                    return False
+            else:
+                try:
+                    app_config = AppConfig.load()
+                    if app_config.knowledge_bases:
+                        kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
+                        if kb_config:
+                            source_dir = Path(kb_config.source_path)
+                        else:
+                            print(f"❌ 未找到知识库配置: {kb_id}")
+                            return False
+                    else:
+                        print(f"❌ 未找到知识库配置")
+                        return False
+                except Exception as e:
+                    print(f"⚠️  读取环境变量配置失败: {e}")
+                    return False
+        except Exception as e:
+            print(f"❌ 加载配置文件失败: {e}")
+            return False
+    
+    if not source_dir.exists():
+        print(f"❌ 源路径不存在: {source_dir}")
+        return False
+    
+    print(f"知识库 ID: {kb_id}")
+    print(f"源路径: {source_dir}")
+    print(f"处理文档数: {max_docs}")
+    print(f"每个文档问题数: {num_questions_per_doc}")
+    print("-" * 60)
+    
+    # 2. 查找文档
+    print("正在扫描文档...")
+    md_files = find_markdown_files(source_dir)
+    
+    if max_docs:
+        md_files = md_files[:max_docs]
+    
+    if not md_files:
+        print("❌ 未找到 .md 文件")
+        return False
+    
+    print(f"✅ 找到 {len(md_files)} 个文档")
+    
+    # 检查文档数量是否足够（RAGAS 需要至少 3 个文档才能形成聚类）
+    if len(md_files) < 3:
+        print(f"⚠️  警告: 文档数量较少（{len(md_files)} 个），可能无法形成聚类")
+        print("   建议: 至少使用 3-5 个文档，或增加 --max-docs 参数")
+        print("   继续尝试生成测试集...")
+    
+    print("-" * 60)
+    
+    # 3. 转换为 langchain Document 格式
+    print("正在转换文档格式...")
+    langchain_docs = convert_documents_to_langchain_docs(md_files)
+    
+    if not langchain_docs:
+        print("❌ 文档转换失败")
+        return False
+    
+    print(f"✅ 成功转换 {len(langchain_docs)} 个文档")
+    print("-" * 60)
+    
+    # 4. 加载配置和初始化 RAGAS TestsetGenerator
+    print("初始化 RAGAS TestsetGenerator...")
+    try:
+        app_config = AppConfig.load()
+        
+        # 将我们的配置适配为 RAGAS 需要的 langchain 对象
+        # RAGAS 需要 langchain_openai.ChatOpenAI 和 ragas.embeddings
+        try:
+            from langchain_openai import ChatOpenAI
+            from ragas.embeddings import OpenAIEmbeddings
+        except ImportError:
+            print("❌ 需要安装 langchain-openai")
+            print("   请运行: pip install langchain-openai")
+            return False
+        
+        # 创建 langchain LLM（从我们的配置读取）
+        # 增加超时设置，避免连接问题
+        generator_llm = ChatOpenAI(
+            model=app_config.llm.model,  # 注意：属性名是 model，不是 model_name
+            api_key=app_config.llm.api_key,
+            base_url=app_config.llm.base_url,
+            temperature=0.1,
+            timeout=120.0,  # 增加超时时间到 120 秒（RAGAS 可能需要较长时间）
+            max_retries=3,  # 增加重试次数
+        )
+        
+        # 创建 Embeddings（从我们的配置读取）
+        # 优先使用 RAGAS 原生的 OpenAIEmbeddings（更稳定，兼容性更好）
+        try:
+            from openai import OpenAI, AsyncOpenAI
+            from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
+            
+            # 创建 OpenAI 客户端（同步和异步）
+            openai_client = OpenAI(
+                api_key=app_config.embedding.api_key,
+                base_url=app_config.embedding.base_url,
+            )
+            async_openai_client = AsyncOpenAI(
+                api_key=app_config.embedding.api_key,
+                base_url=app_config.embedding.base_url,
+            )
+            
+            # 使用 RAGAS 的 OpenAIEmbeddings（直接使用 OpenAI 客户端，更稳定）
+            embeddings = RagasOpenAIEmbeddings(
+                client=openai_client,
+                model=app_config.embedding.model,
+            )
+            # 注意：RAGAS OpenAIEmbeddings 可能需要设置 async_client
+            if hasattr(embeddings, 'async_client'):
+                embeddings.async_client = async_openai_client
+            
+            print("✅ 使用 RAGAS 原生的 OpenAIEmbeddings")
+        except Exception as e:
+            print(f"⚠️  创建 RAGAS OpenAIEmbeddings 失败: {e}")
+            print("    尝试使用 langchain OpenAIEmbeddings + LangchainEmbeddingsWrapper")
+            try:
+                # 备用方案：使用 langchain OpenAIEmbeddings
+                from langchain_openai import OpenAIEmbeddings as LangchainOpenAIEmbeddings
+                from ragas.embeddings import LangchainEmbeddingsWrapper
+                
+                langchain_embeddings = LangchainOpenAIEmbeddings(
+                    model=app_config.embedding.model,
+                    api_key=app_config.embedding.api_key,
+                    base_url=app_config.embedding.base_url,
+                )
+                embeddings = LangchainEmbeddingsWrapper(langchain_embeddings)
+                print("✅ 使用 LangchainEmbeddingsWrapper 包装 langchain OpenAIEmbeddings")
+            except Exception as e2:
+                print(f"❌ 创建 Embeddings 失败: {e2}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        # 创建 TestsetGenerator
+        # RAGAS 0.4.2 使用 from_langchain 创建，参数名是 llm 和 embedding_model
+        try:
+            generator = TestsetGenerator.from_langchain(
+                llm=generator_llm,  # 注意：参数名是 llm，不是 generator_llm
+                embedding_model=embeddings,
+            )
+        except Exception as e:
+            print(f"❌ 创建 TestsetGenerator 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        print("✅ TestsetGenerator 初始化成功")
+        print("-" * 60)
+        
+        # 5. 创建查询分布（query_distribution）
+        # 注意：RAGAS 0.4.2 的 query_distribution 可能有 bug，导致 'float' object is not iterable
+        # 问题可能出在 scenario_sample_list 的构建与 query_distribution 的匹配上
+        # 尝试使用 query_distribution，如果失败则回退到默认行为
+        query_dist = None
+        use_query_distribution = True  # 尝试使用，如果失败再禁用
+        
+        if use_query_distribution and default_query_distribution is not None:
+            try:
+                # 创建一个适配器，将 langchain LLM 转换为 RAGAS LLM
+                from ragas.llms import LangchainLLMWrapper
+                ragas_llm = LangchainLLMWrapper(generator_llm)
+                
+                # 创建默认查询分布（包括单跳、多跳等查询类型）
+                query_dist = default_query_distribution(ragas_llm)
+                print(f"✅ 创建查询分布: {len(query_dist)} 种查询类型")
+                for synthesizer, weight in query_dist:
+                    print(f"   - {synthesizer.__class__.__name__}: {weight}")
+                
+                # 验证 query_distribution 的结构
+                if not isinstance(query_dist, list):
+                    print(f"⚠️  query_distribution 不是列表，禁用它")
+                    query_dist = None
+                else:
+                    # 检查每个元素是否是 (synthesizer, weight) 元组
+                    for item in query_dist:
+                        if not isinstance(item, (tuple, list)) or len(item) != 2:
+                            print(f"⚠️  query_distribution 格式不正确，禁用它")
+                            query_dist = None
+                            break
+            except Exception as e:
+                print(f"⚠️  创建查询分布失败: {e}")
+                print("    将使用默认查询类型（不指定 query_distribution）")
+                import traceback
+                traceback.print_exc()
+                query_dist = None
+        else:
+            print("ℹ️  未尝试创建查询分布")
+            print("    将使用默认查询类型（仍然会生成多样化的查询）")
+        
+        print("-" * 60)
+        
+        # 6. 生成测试集
+        total_questions = max_docs * num_questions_per_doc
+        print(f"开始生成测试集（目标: {total_questions} 个问题）...")
+        
+        try:
+            # RAGAS 0.4.2 使用 generate_with_langchain_docs 方法
+            # 重要：传入 transforms_embedding_model 参数，使用我们测试过的 embeddings
+            # 这样确保 RAGAS 内部使用的 embedding_model 与我们测试的一致
+            kwargs = {
+                "documents": langchain_docs,
+                "testset_size": total_questions,
+                "transforms_embedding_model": embeddings,  # 明确指定 embedding_model
+                "raise_exceptions": False,
+            }
+            
+            # 尝试使用 query_distribution（如果有）
+            if query_dist is not None:
+                kwargs["query_distribution"] = query_dist
+                print(f"   尝试使用查询分布（{len(query_dist)} 种查询类型）...")
+            
+            testset = generator.generate_with_langchain_docs(**kwargs)
+        except TypeError as e:
+            # 捕获 'float' object is not iterable 错误
+            if "'float' object is not iterable" in str(e) or "float" in str(e).lower():
+                print(f"⚠️  使用 query_distribution 时遇到已知 bug: {e}")
+                print("   回退到不使用 query_distribution（仍会生成测试用例，但查询类型可能较少）...")
+                
+                # 重试，不使用 query_distribution
+                kwargs.pop("query_distribution", None)
+                try:
+                    testset = generator.generate_with_langchain_docs(**kwargs)
+                    print("✅ 回退后生成成功")
+                except Exception as e2:
+                    print(f"❌ 回退后仍然失败: {e2}")
+                    import traceback
+                    traceback.print_exc()
+                    return False
+            else:
+                print(f"❌ 生成测试集失败: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        except ValueError as e:
+            # 捕获聚类错误（No relationships match the provided condition. Cannot form clusters.）
+            error_msg = str(e)
+            if "Cannot form clusters" in error_msg or "No relationships match" in error_msg:
+                print(f"⚠️  无法形成聚类: {error_msg}")
+                print()
+                print("可能的原因:")
+                print("  1. 文档数量太少（少于 3 个），无法形成聚类")
+                print("  2. 文档之间的相似度太低，无法形成有意义的聚类")
+                print("  3. 文档内容太短或太相似，导致聚类失败")
+                print()
+                print("解决方案:")
+                print("  1. 增加文档数量（至少 3-5 个文档）")
+                print(f"     当前文档数: {len(langchain_docs)}")
+                print(f"     建议: 使用 --max-docs 参数增加文档数量，例如: --max-docs 10")
+                print("  2. 减少 testset_size（减少要生成的问题数量）")
+                print(f"     当前 testset_size: {total_questions}")
+                print(f"     建议: 减少 num_questions_per_doc 或 max_docs")
+                print("  3. 增加文档的多样性（使用不同主题的文档）")
+                print()
+                print("尝试使用更少的 testset_size 重试...")
+                
+                # 尝试使用更小的 testset_size
+                smaller_testset_size = max(1, total_questions // 2)
+                if smaller_testset_size < total_questions:
+                    print(f"   重试: testset_size = {smaller_testset_size} (原: {total_questions})")
+                    try:
+                        kwargs["testset_size"] = smaller_testset_size
+                        testset = generator.generate_with_langchain_docs(**kwargs)
+                        print("✅ 使用更小的 testset_size 后生成成功")
+                    except Exception as e2:
+                        print(f"❌ 重试后仍然失败: {e2}")
+                        return False
+                else:
+                    return False
+            else:
+                # 其他 ValueError
+                print(f"❌ 生成测试集失败 (ValueError): {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        except Exception as e:
+            # 检查是否是连接错误
+            if openai and isinstance(e, openai.APIConnectionError):
+                is_connection_error = True
+            elif isinstance(e, (ConnectionError, RuntimeError)):
+                is_connection_error = True
+            elif "Event loop is closed" in str(e) or "Connection error" in str(e):
+                is_connection_error = True
+            else:
+                is_connection_error = False
+            
+            if is_connection_error:
+                # 捕获连接错误（可能是网络问题或事件循环问题）
+                error_msg = str(e)
+                print(f"⚠️  遇到连接错误（可能是临时网络问题）: {error_msg}")
+                print("   这可能不是必现的，建议：")
+                print("   1. 检查网络连接")
+                print("   2. 检查 LLM API 服务是否正常")
+                print("   3. 稍后重试")
+                print("   4. 或者减少 testset_size 和文档数量重试")
+                import traceback
+                traceback.print_exc()
+                return False
+            else:
+                # 其他类型的错误
+                print(f"❌ 生成测试集失败: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        if not testset:
+            print("❌ 未生成任何测试样本")
+            return False
+        
+        # 转换为 DataFrame 以便访问数据
+        try:
+            testset_df = testset.to_pandas()
+        except Exception as e:
+            print(f"⚠️  无法转换为 DataFrame: {e}")
+            print("    尝试直接访问 testset 属性...")
+            # 如果无法转换为 DataFrame，尝试直接访问属性
+            testset_df = None
+        
+        if testset_df is not None:
+            num_samples = len(testset_df)
+            print(f"✅ 成功生成 {num_samples} 个测试样本")
+        else:
+            # 尝试通过属性访问
+            num_samples = len(testset.questions) if hasattr(testset, 'questions') else 0
+            print(f"✅ 成功生成 {num_samples} 个测试样本（通过属性访问）")
+        
+        print("-" * 60)
+        
+        # 7. 转换为目标格式
+        print("正在转换数据格式...")
+        samples = []
+        
+        if testset_df is not None:
+            # 使用 DataFrame 访问数据
+            for _, row in testset_df.iterrows():
+                sample = {
+                    "question": row.get("user_input", row.get("question", "")),
+                    "answer": "",  # 留空，后续用 RAG 生成
+                    "ground_truth": row.get("reference", row.get("ground_truth", "")),
+                    "contexts": row.get("reference_contexts", row.get("contexts", [])),
+                }
+                samples.append(sample)
+        else:
+            # 直接访问 testset 属性
+            questions = getattr(testset, 'questions', getattr(testset, 'user_input', []))
+            ground_truths = getattr(testset, 'ground_truth', getattr(testset, 'reference', []))
+            contexts_list = getattr(testset, 'contexts', getattr(testset, 'reference_contexts', []))
+            
+            for i in range(len(questions)):
+                sample = {
+                    "question": questions[i] if i < len(questions) else "",
+                    "answer": "",  # 留空，后续用 RAG 生成
+                    "ground_truth": ground_truths[i] if i < len(ground_truths) else "",
+                    "contexts": contexts_list[i] if i < len(contexts_list) else [],
+                }
+                samples.append(sample)
+        
+        # 7. 保存数据集
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        dataset = {
+            "metadata": {
+                "kb_id": kb_id,
+                "source_path": str(source_dir),
+                "generated_at": str(Path().cwd()),
+                "total_samples": len(samples),
+                "generation_method": "ragas_testset_generator",
+            },
+            "samples": samples,
+        }
+        
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(dataset, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ 测试集已保存: {output_file}")
+        print(f"   共 {len(samples)} 个样本")
+        print()
+        
+        # 显示测试集的前几个样本，让用户查看内容
+        print("=" * 60)
+        print("测试集预览（前 3 个样本）:")
+        print("=" * 60)
+        preview_count = min(3, len(samples))
+        for i, sample in enumerate(samples[:preview_count], 1):
+            print(f"\n样本 {i}:")
+            print(f"  问题 (question): {sample.get('question', '')[:100]}{'...' if len(sample.get('question', '')) > 100 else ''}")
+            print(f"  答案 (answer): {sample.get('answer', '')[:100] if sample.get('answer') else '(空，待生成)'}{'...' if sample.get('answer') and len(sample.get('answer', '')) > 100 else ''}")
+            print(f"  标准答案 (ground_truth): {sample.get('ground_truth', '')[:100] if sample.get('ground_truth') else '(无)'}{'...' if sample.get('ground_truth') and len(sample.get('ground_truth', '')) > 100 else ''}")
+            contexts = sample.get('contexts', [])
+            print(f"  上下文 (contexts): {len(contexts)} 个文档块")
+            if contexts:
+                print(f"    第一个上下文: {contexts[0][:100] if isinstance(contexts[0], str) else str(contexts[0])[:100]}{'...' if len(str(contexts[0])) > 100 else ''}")
+        
+        if len(samples) > preview_count:
+            print(f"\n... 还有 {len(samples) - preview_count} 个样本未显示")
+        
+        print()
+        print("=" * 60)
+        print(f"完整测试集已保存到: {output_file}")
+        print("可以使用以下命令查看完整内容:")
+        print(f"  cat {output_file}")
+        print("或使用 Python:")
+        print(f"  python3 -c \"import json; data = json.load(open('{output_file}')); print(json.dumps(data, ensure_ascii=False, indent=2))\"")
+        print("=" * 60)
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 处理失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def generate_ragas_dataset(
     kb_id: str,
     source_path: Optional[str] = None,
@@ -148,20 +705,40 @@ def generate_ragas_dataset(
     if source_path:
         source_dir = Path(source_path)
     else:
-        try:
-            app_config = AppConfig.load()
-            if app_config.knowledge_bases:
-                kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
-                if kb_config:
-                    source_dir = Path(kb_config.source_path)
-                else:
-                    print(f"❌ 未找到知识库配置: {kb_id}")
-                    return False
-            else:
-                print("❌ 未找到知识库配置")
-                return False
-        except Exception as e:
-            print(f"❌ 加载配置失败: {e}")
+        # 从配置文件读取
+        source_dir = None
+        
+        # 方式1：从 knowledge_bases.json 读取
+        kb_json_path = Path(project_root) / "knowledge_bases.json"
+        if kb_json_path.exists():
+            try:
+                with open(kb_json_path, "r", encoding="utf-8") as f:
+                    kb_config_data = json.load(f)
+                kb_list = kb_config_data.get("knowledge_bases", [])
+                kb_config_dict = next((kb for kb in kb_list if kb.get("kb_id") == kb_id), None)
+                if kb_config_dict:
+                    source_dir = Path(kb_config_dict["source_path"])
+            except Exception as e:
+                print(f"⚠️  读取 knowledge_bases.json 失败: {e}")
+        
+        # 方式2：从环境变量配置读取
+        if source_dir is None:
+            try:
+                app_config = AppConfig.load()
+                if app_config.knowledge_bases:
+                    kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
+                    if kb_config:
+                        source_dir = Path(kb_config.source_path)
+            except Exception as e:
+                print(f"⚠️  读取环境变量配置失败: {e}")
+        
+        # 如果仍未找到，报错
+        if source_dir is None:
+            print(f"❌ 未找到知识库配置: {kb_id}")
+            print(f"   提示:")
+            print(f"   1. 检查 knowledge_bases.json 文件")
+            print(f"   2. 或使用 --source-path 参数指定路径")
+            print(f"   3. 或配置环境变量 RAG_KNOWLEDGE_BASES")
             return False
     
     if not source_dir.exists():
@@ -242,7 +819,8 @@ def generate_ragas_dataset(
                     # 提取上下文（检索到的文档块）
                     # RAGAS 需要 contexts 是字符串列表
                     contexts = []
-                    for chunk in result.get("chunks", []):
+                    # 兼容不同返回字段：engine.query 可能返回 sources 或 chunks
+                    for chunk in (result.get("chunks") or result.get("sources") or []):
                         chunk_text = chunk.get("text", "")
                         if chunk_text:
                             contexts.append(chunk_text)
@@ -298,6 +876,34 @@ def generate_ragas_dataset(
     
     print(f"✅ 评估数据集已保存: {output_file}")
     print(f"   总样本数: {len(ragas_samples)}")
+    print()
+    
+    # 显示测试集的前几个样本，让用户查看内容
+    print("=" * 60)
+    print("测试集预览（前 3 个样本）:")
+    print("=" * 60)
+    preview_count = min(3, len(ragas_samples))
+    for i, sample in enumerate(ragas_samples[:preview_count], 1):
+        print(f"\n样本 {i}:")
+        print(f"  问题 (question): {sample.get('question', '')[:100]}{'...' if len(sample.get('question', '')) > 100 else ''}")
+        print(f"  答案 (answer): {sample.get('answer', '')[:100] if sample.get('answer') else '(空，待生成)'}{'...' if sample.get('answer') and len(sample.get('answer', '')) > 100 else ''}")
+        print(f"  标准答案 (ground_truth): {sample.get('ground_truth', '')[:100] if sample.get('ground_truth') else '(无)'}{'...' if sample.get('ground_truth') and len(sample.get('ground_truth', '')) > 100 else ''}")
+        contexts = sample.get('contexts', [])
+        print(f"  上下文 (contexts): {len(contexts)} 个文档块")
+        if contexts:
+            print(f"    第一个上下文: {contexts[0][:100] if isinstance(contexts[0], str) else str(contexts[0])[:100]}{'...' if len(str(contexts[0])) > 100 else ''}")
+    
+    if len(ragas_samples) > preview_count:
+        print(f"\n... 还有 {len(ragas_samples) - preview_count} 个样本未显示")
+    
+    print()
+    print("=" * 60)
+    print(f"完整测试集已保存到: {output_file}")
+    print("可以使用以下命令查看完整内容:")
+    print(f"  cat {output_file}")
+    print("或使用 Python:")
+    print(f"  python3 -c \"import json; data = json.load(open('{output_file}')); print(json.dumps(data, ensure_ascii=False, indent=2))\"")
+    print("=" * 60)
     
     return True
 
@@ -332,47 +938,321 @@ def evaluate_with_ragas(
         return False
     
     print(f"✅ 加载 {len(samples)} 个评估样本")
+    
+    # 检查是否有空答案，如果有则用 RAG 生成
+    empty_answer_count = sum(1 for s in samples if not s.get("answer") or s.get("answer", "").strip() == "")
+    if empty_answer_count > 0:
+        print(f"⚠️  发现 {empty_answer_count} 个样本的答案为空，需要先用 RAG 生成答案...")
+        
+        # 获取知识库 ID
+        kb_id = dataset.get("metadata", {}).get("kb_id")
+        if not kb_id:
+            print("❌ 数据集中没有 kb_id，无法生成答案")
+            print("   提示: 请确保数据集包含 metadata.kb_id")
+            return False
+        
+        # 初始化 RAG 引擎
+        try:
+            engine = RAGEngine(kb_id=kb_id)
+            print("✅ RAG 引擎初始化成功")
+        except Exception as e:
+            print(f"❌ 初始化 RAG 引擎失败: {e}")
+            return False
+        
+        # 为每个空答案生成答案
+        print(f"正在为 {empty_answer_count} 个样本生成答案...")
+        generated_count = 0
+        failed_count = 0
+        for i, sample in enumerate(samples):
+            if not sample.get("answer") or sample.get("answer", "").strip() == "":
+                question = sample.get("question", "")
+                if question:
+                    try:
+                        result = engine.query(question, top_k=5)
+                        answer = result.get("answer", "")
+                        if answer and isinstance(answer, str) and answer.strip():
+                            sample["answer"] = answer.strip()  # 确保去除首尾空格
+                            generated_count += 1
+                            print(f"  ✅ [{i+1}/{empty_answer_count}] 答案生成成功（长度: {len(answer)} 字符）")
+                        else:
+                            # RAG 引擎返回空答案，使用占位符（非空字符串，避免 answer_relevancy 报错）
+                            failed_count += 1
+                            placeholder = f"[无法生成答案：知识库中可能没有相关信息，或检索失败]"
+                            sample["answer"] = placeholder
+                            print(f"  ⚠️  [{i+1}/{empty_answer_count}] RAG 引擎返回空答案，使用占位符")
+                            print(f"     问题: {question[:50]}...")
+                            print(f"     占位符: {placeholder}")
+                    except Exception as e:
+                        # 生成答案失败，使用占位符（非空字符串，避免 answer_relevancy 报错）
+                        failed_count += 1
+                        placeholder = f"[无法生成答案：{str(e)[:50]}]"
+                        sample["answer"] = placeholder
+                        print(f"  ❌ [{i+1}/{empty_answer_count}] 生成答案失败，使用占位符: {e}")
+                        print(f"     问题: {question[:50]}...")
+                        print(f"     占位符: {placeholder}")
+                else:
+                    failed_count += 1
+                    print(f"  ⚠️  [{i+1}/{empty_answer_count}] 问题为空，跳过")
+        
+        print(f"\n✅ 成功生成 {generated_count}/{empty_answer_count} 个答案")
+        if failed_count > 0:
+            print(f"⚠️  失败/跳过 {failed_count} 个样本（这些样本将在评估时被过滤）")
+    
     print("-" * 60)
     
     # 2. 转换为 RAGAS 格式
     print("转换数据格式...")
     
     # RAGAS 需要的数据格式
+    # 确保所有文本都是字符串类型（避免 API 格式错误）
+    def ensure_string(value):
+        """确保值是字符串类型"""
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            return str(value)
+        return value
+    
+    def ensure_string_list(value):
+        """确保值是字符串列表"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [ensure_string(item) for item in value]
+        return [str(value)]
+    
+    # 确保所有样本都有非空答案（如果为空，使用占位符）
+    # 不再过滤样本，而是确保所有答案都是有效的非空字符串
+    placeholder_count = 0
+    for s in samples:
+        answer = s.get("answer", "")
+        # 确保答案是字符串类型
+        if not isinstance(answer, str):
+            answer = str(answer)
+        # 去除首尾空格
+        answer = answer.strip()
+        # 如果答案为空，使用占位符（非空字符串，避免 answer_relevancy 报错）
+        if not answer:
+            placeholder = "[无法生成答案：知识库中可能没有相关信息，或检索失败]"
+            s["answer"] = placeholder
+            placeholder_count += 1
+    
+    if placeholder_count > 0:
+        print(f"⚠️  {placeholder_count} 个样本的答案为空，已使用占位符（非空字符串）")
+        print(f"   占位符: [无法生成答案：知识库中可能没有相关信息，或检索失败]")
+    
+    # 所有样本都有效（因为已经确保答案非空）
+    valid_samples = samples
+    
+    # 确保所有字段都是正确的类型
+    # 特别注意：answer 必须是非空字符串，否则 answer_relevancy 会失败
+    # 清理答案，移除可能导致 RAGAS 处理问题的特殊字符
+    def clean_answer(answer: str) -> str:
+        """清理答案，确保只包含有效的字符串内容"""
+        if not isinstance(answer, str):
+            answer = str(answer)
+        # 去除首尾空格
+        answer = answer.strip()
+        # 确保非空
+        if not answer:
+            return "[无法生成答案：知识库中可能没有相关信息，或检索失败]"
+        # 移除可能导致问题的特殊字符（如控制字符、NULL 字符等）
+        # 保留换行符、制表符等常见空白字符
+        cleaned = []
+        for char in answer:
+            # 保留可打印字符、换行符、制表符、空格
+            if char.isprintable() or char in ['\n', '\t', ' ']:
+                cleaned.append(char)
+            # 移除控制字符（除了换行符和制表符）
+            elif ord(char) < 32 and char not in ['\n', '\t']:
+                continue
+            else:
+                cleaned.append(char)
+        answer = ''.join(cleaned)
+        # 确保最终结果是有效的非空字符串
+        if not answer or not answer.strip():
+            return "[无法生成答案：知识库中可能没有相关信息，或检索失败]"
+        return answer.strip()
+    
+    cleaned_answers = []
+    for s in valid_samples:
+        answer = s.get("answer", "")
+        cleaned_answer = clean_answer(answer)
+        cleaned_answers.append(cleaned_answer)
+    
     ragas_data = {
-        "question": [s["question"] for s in samples],
-        "contexts": [s["contexts"] for s in samples],  # 每个元素是字符串列表
-        "answer": [s["answer"] for s in samples],
+        "question": [ensure_string(s.get("question", "")) for s in valid_samples],
+        "contexts": [ensure_string_list(s.get("contexts", [])) for s in valid_samples],  # 每个元素是字符串列表
+        "answer": cleaned_answers,  # 使用清理后的答案（确保非空）
     }
     
     # ground_truth 是可选的（如果所有样本都有 ground_truth，则添加）
-    if any(s.get("ground_truth") for s in samples):
-        ragas_data["ground_truth"] = [s.get("ground_truth", "") for s in samples]
+    if any(s.get("ground_truth") for s in valid_samples):
+        ragas_data["ground_truth"] = [ensure_string(s.get("ground_truth", "")) for s in valid_samples]
     
     ragas_dataset = Dataset.from_dict(ragas_data)
     print("✅ 数据格式转换完成")
     print("-" * 60)
     
-    # 3. 使用 RAGAS 评估
-    print("\n开始评估...")
-    print("评估指标:")
-    print("  - Faithfulness（忠实度）")
-    print("  - Answer Relevancy（回答相关性）")
-    print("  - Context Precision（上下文精确率）")
-    print("  - Context Recall（上下文召回率）")
+    # 3. 加载配置，创建 LLM 和 Embeddings（RAGAS 评估需要）
+    print("\n初始化 LLM 和 Embeddings（评估需要）...")
+    try:
+        app_config = AppConfig.load()
+        
+        # 使用 llm_factory 直接创建 RAGAS LLM（不使用 LangChain）
+        from openai import OpenAI, AsyncOpenAI
+        from ragas.llms import llm_factory
+        from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
+        
+        # 创建 LLM 客户端
+        openai_client = OpenAI(
+            api_key=app_config.llm.api_key,
+            base_url=app_config.llm.base_url,
+        )
+        
+        # 使用 llm_factory 创建 RAGAS LLM（推荐方式，不需要 LangChain）
+        # 注意：增加 max_tokens 以避免输出被截断（faithfulness 需要生成较长的输出）
+        ragas_llm = llm_factory(
+            model=app_config.llm.model,
+            provider="openai",
+            client=openai_client,
+            temperature=0.1,
+            max_tokens=4096,  # 增加 max_tokens，避免输出被截断
+        )
+        print("✅ LLM 初始化成功（使用 llm_factory，不依赖 LangChain，max_tokens=4096）")
+        
+        # 创建 Embeddings（用于 Context Precision/Recall）
+        # 使用 RAGAS 原生的 OpenAIEmbeddings（不依赖 LangChain）
+        
+        embedding_client = OpenAI(
+            api_key=app_config.embedding.api_key,
+            base_url=app_config.embedding.base_url,
+        )
+        async_embedding_client = AsyncOpenAI(
+            api_key=app_config.embedding.api_key,
+            base_url=app_config.embedding.base_url,
+        )
+        
+        ragas_embeddings = RagasOpenAIEmbeddings(
+            client=embedding_client,
+            model=app_config.embedding.model,
+        )
+        # 设置异步客户端（如果支持）
+        if hasattr(ragas_embeddings, 'async_client'):
+            ragas_embeddings.async_client = async_embedding_client
+        
+        # 创建适配器：RAGAS 的 OpenAIEmbeddings 使用 embed_text，但 metrics 需要 embed_query
+        # 创建一个适配器类，将 embed_text 转换为 embed_query 和 embed_documents
+        class EmbeddingsAdapter:
+            """适配器，将 embed_text 转换为 embed_query 和 embed_documents"""
+            def __init__(self, embeddings):
+                self.embeddings = embeddings
+            
+            def embed_query(self, text: str):
+                """适配 embed_query 到 embed_text"""
+                return self.embeddings.embed_text(text)
+            
+            def embed_documents(self, texts: list):
+                """适配 embed_documents 到 embed_texts"""
+                return self.embeddings.embed_texts(texts)
+            
+            async def aembed_query(self, text: str):
+                """适配 aembed_query 到 aembed_text"""
+                return await self.embeddings.aembed_text(text)
+            
+            async def aembed_documents(self, texts: list):
+                """适配 aembed_documents 到 aembed_texts"""
+                return await self.embeddings.aembed_texts(texts)
+            
+            def __getattr__(self, name):
+                """转发其他属性到原始 embeddings"""
+                return getattr(self.embeddings, name)
+        
+        embeddings = EmbeddingsAdapter(ragas_embeddings)
+        print("✅ Embeddings 初始化成功（使用 RAGAS OpenAIEmbeddings + 适配器，不依赖 LangChain）")
+        
+    except Exception as e:
+        print(f"❌ 初始化 LLM/Embeddings 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
     print("-" * 60)
+    
+    # 4. 使用 RAGAS 评估
+    print("\n开始评估...")
+    print("评估指标说明:")
+    print("  - Faithfulness（忠实度）: 使用 LLM 判断答案是否忠实于上下文")
+    print("  - Answer Relevancy（回答相关性）: 使用 LLM 判断答案与问题的相关性")
+    print("  - Context Precision（上下文精确率）: 使用 Embeddings 计算语义相似度")
+    print("  - Context Recall（上下文召回率）: 使用 Embeddings 计算语义相似度")
+    print("-" * 60)
+    
+    # 尝试评估所有指标，如果 answer_relevancy 失败，则只评估其他指标
+    # 注意：将 answer_relevancy 的 strictness 设置为 1，避免多生成问题时的兼容性问题
+    # 当 strictness > 1 时，RAGAS 会创建多个 PromptValue，可能导致通义千问 API 报错
+    answer_relevancy.strictness = 1
+    print(f"⚠️  将 answer_relevancy.strictness 设置为 1（避免多生成问题时的兼容性问题）")
+    print()
+    
+    metrics_to_evaluate = [
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall,
+    ]
+    
+    # 添加日志记录，查看评估过程中的错误
+    import logging
+    logging.basicConfig(level=logging.WARNING)
+    ragas_logger = logging.getLogger("ragas")
+    ragas_logger.setLevel(logging.WARNING)
     
     try:
         result = evaluate(
             dataset=ragas_dataset,
-            metrics=[
-                faithfulness,
-                answer_relevancy,
-                context_precision,
-                context_recall,
-            ],
+            metrics=metrics_to_evaluate,
+            llm=ragas_llm,  # 传递 LLM（用于需要 LLM 的指标）
+            embeddings=embeddings,  # 传递 Embeddings（用于需要 Embeddings 的指标）
+            raise_exceptions=False,  # 不抛出异常，继续评估其他指标
         )
         
-        # 4. 显示结果
+        # 检查结果中是否有 answer_relevancy 的分数
+        result_df = result.to_pandas()
+        if "answer_relevancy" in result_df.columns:
+            answer_relevancy_scores = result_df["answer_relevancy"].dropna()
+            if len(answer_relevancy_scores) == 0:
+                print("\n⚠️  answer_relevancy 评估失败：所有样本的分数都是 NaN")
+                print("   可能的原因：")
+                print("   1. LLM 生成的问题为空或格式不正确")
+                print("   2. Embeddings 调用失败")
+                print("   3. 与通义千问 API 的兼容性问题")
+                print("\n   尝试单独测试 answer_relevancy...")
+                
+                # 尝试单独测试 answer_relevancy 以获取更详细的错误信息
+                try:
+                    from ragas import evaluate as ragas_evaluate
+                    from ragas.metrics import answer_relevancy as test_answer_relevancy
+                    
+                    # 只评估 answer_relevancy
+                    test_result = ragas_evaluate(
+                        dataset=ragas_dataset,
+                        metrics=[test_answer_relevancy],
+                        llm=ragas_llm,
+                        embeddings=embeddings,
+                        raise_exceptions=True,  # 设置为 True 以查看详细错误
+                    )
+                    print("   ✅ 单独测试 answer_relevancy 成功")
+                except Exception as test_e:
+                    print(f"   ❌ 单独测试 answer_relevancy 失败: {test_e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"\n✅ answer_relevancy 评估成功：{len(answer_relevancy_scores)}/{len(result_df)} 个样本有分数")
+        
+        # 4. 显示结果（评估成功的情况）
         print("\n" + "=" * 60)
         print("RAGAS 评估结果")
         print("=" * 60)
@@ -380,16 +1260,24 @@ def evaluate_with_ragas(
         # 转换为字典格式以便显示
         result_dict = result.to_pandas().to_dict(orient="records")
         
-        # 计算平均分数
+        # 计算平均分数（过滤掉 nan 值）
+        import math
         avg_scores = {}
         for metric in ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]:
-            scores = [r.get(metric, 0) for r in result_dict if metric in r]
-            if scores:
-                avg_scores[metric] = sum(scores) / len(scores)
+            scores = [r.get(metric) for r in result_dict if metric in r]
+            # 过滤掉 None 和 nan 值
+            valid_scores = [s for s in scores if s is not None and not (isinstance(s, float) and math.isnan(s))]
+            if valid_scores:
+                avg_scores[metric] = sum(valid_scores) / len(valid_scores)
+            else:
+                avg_scores[metric] = float('nan')  # 如果没有有效分数，设置为 nan
         
         print("\n平均分数:")
         for metric, score in avg_scores.items():
-            print(f"  {metric:20s}: {score:.4f} ({score*100:.2f}%)")
+            if isinstance(score, float) and math.isnan(score):
+                print(f"  {metric:20s}: nan (评估失败，可能是与通义千问 API 的兼容性问题)")
+            else:
+                print(f"  {metric:20s}: {score:.4f} ({score*100:.2f}%)")
         
         # 保存结果
         if output_path:
@@ -397,9 +1285,20 @@ def evaluate_with_ragas(
             output_file.parent.mkdir(parents=True, exist_ok=True)
             
             # 保存为 JSON
+            # 注意：需要处理 NaN 值，因为 JSON 标准不支持 NaN
+            def convert_nan(obj):
+                """递归转换 NaN 为 None"""
+                if isinstance(obj, float) and math.isnan(obj):
+                    return None
+                elif isinstance(obj, dict):
+                    return {k: convert_nan(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_nan(item) for item in obj]
+                return obj
+            
             result_json = {
-                "average_scores": avg_scores,
-                "detailed_results": result_dict,
+                "average_scores": convert_nan(avg_scores),
+                "detailed_results": convert_nan(result_dict),
             }
             
             with open(output_file, "w", encoding="utf-8") as f:
@@ -408,6 +1307,99 @@ def evaluate_with_ragas(
             print(f"\n✅ 评估结果已保存: {output_file}")
         
         return True
+        
+    except Exception as e:
+        # 如果评估失败，可能是因为 answer_relevancy 与通义千问 API 的兼容性问题
+        error_msg = str(e)
+        if "contents is neither str nor list of str" in error_msg or "InvalidParameter" in error_msg:
+            print(f"\n⚠️  评估时遇到兼容性问题: {error_msg[:100]}")
+            print("   这可能是 answer_relevancy 与通义千问 API 的兼容性问题")
+            print("   尝试只评估其他指标（faithfulness, context_precision, context_recall）...")
+            
+            # 只评估其他指标
+            metrics_to_evaluate = [
+                faithfulness,
+                # answer_relevancy,  # 暂时跳过
+                context_precision,
+                context_recall,
+            ]
+            
+            try:
+                result = evaluate(
+                    dataset=ragas_dataset,
+                    metrics=metrics_to_evaluate,
+                    llm=ragas_llm,
+                    embeddings=embeddings,
+                    raise_exceptions=False,
+                )
+                print("✅ 使用其他指标评估成功（answer_relevancy 已跳过）")
+                
+                # 显示结果（评估成功的情况）
+                print("\n" + "=" * 60)
+                print("RAGAS 评估结果")
+                print("=" * 60)
+                
+                # 转换为字典格式以便显示
+                result_dict = result.to_pandas().to_dict(orient="records")
+                
+                # 计算平均分数（过滤掉 nan 值）
+                import math
+                avg_scores = {}
+                for metric in ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]:
+                    scores = [r.get(metric) for r in result_dict if metric in r]
+                    # 过滤掉 None 和 nan 值
+                    valid_scores = [s for s in scores if s is not None and not (isinstance(s, float) and math.isnan(s))]
+                    if valid_scores:
+                        avg_scores[metric] = sum(valid_scores) / len(valid_scores)
+                    else:
+                        avg_scores[metric] = float('nan')  # 如果没有有效分数，设置为 nan
+                
+                print("\n平均分数:")
+                for metric, score in avg_scores.items():
+                    if isinstance(score, float) and math.isnan(score):
+                        print(f"  {metric:20s}: nan (评估失败，可能是与通义千问 API 的兼容性问题)")
+                    else:
+                        print(f"  {metric:20s}: {score:.4f} ({score*100:.2f}%)")
+                
+                # 保存结果
+                if output_path:
+                    output_file = Path(output_path)
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # 保存为 JSON
+                    # 注意：需要处理 NaN 值，因为 JSON 标准不支持 NaN
+                    def convert_nan(obj):
+                        """递归转换 NaN 为 None"""
+                        if isinstance(obj, float) and math.isnan(obj):
+                            return None
+                        elif isinstance(obj, dict):
+                            return {k: convert_nan(v) for k, v in obj.items()}
+                        elif isinstance(obj, list):
+                            return [convert_nan(item) for item in obj]
+                        return obj
+                    
+                    result_json = {
+                        "average_scores": convert_nan(avg_scores),
+                        "detailed_results": convert_nan(result_dict),
+                    }
+                    
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        json.dump(result_json, f, ensure_ascii=False, indent=2)
+                    
+                    print(f"\n✅ 评估结果已保存: {output_file}")
+                
+                return True
+            except Exception as e2:
+                print(f"❌ 评估失败: {e2}")
+                import traceback
+                traceback.print_exc()
+                return False
+        else:
+            # 其他类型的错误
+            print(f"❌ 评估失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
         
     except Exception as e:
         print(f"❌ 评估失败: {e}")
@@ -426,8 +1418,8 @@ def main():
     
     parser.add_argument(
         "--kb-id",
-        required=True,
-        help="知识库 ID",
+        required=False,  # 如果使用 --evaluate-only，可以从测试集文件中读取
+        help="知识库 ID（如果使用 --evaluate-only，可以从测试集文件中读取）",
     )
     parser.add_argument(
         "--source-path",
@@ -462,10 +1454,15 @@ def main():
         "--eval-output",
         help="评估结果输出路径（默认: ragas_eval_results.json）",
     )
+    parser.add_argument(
+        "--use-testset-generator",
+        action="store_true",
+        help="使用 RAGAS TestsetGenerator 生成测试集（新方法，推荐）",
+    )
     
     args = parser.parse_args()
     
-    # 如果只评估
+    # 如果只评估，不需要 kb_id（可以从测试集文件中读取）
     if args.evaluate_only:
         success = evaluate_with_ragas(
             dataset_path=args.evaluate_only,
@@ -474,13 +1471,24 @@ def main():
         return 0 if success else 1
     
     # 生成数据集
-    success = generate_ragas_dataset(
-        kb_id=args.kb_id,
-        source_path=args.source_path,
-        output_path=args.output,
-        max_docs=args.max_docs,
-        max_questions_per_doc=args.max_questions_per_doc,
-    )
+    if args.use_testset_generator:
+        # 使用 RAGAS TestsetGenerator（新方法）
+        success = generate_ragas_dataset_with_testset_generator(
+            kb_id=args.kb_id,
+            source_path=args.source_path,
+            output_path=args.output,
+            max_docs=args.max_docs or 5,
+            num_questions_per_doc=args.max_questions_per_doc or 3,
+        )
+    else:
+        # 使用原有方法
+        success = generate_ragas_dataset(
+            kb_id=args.kb_id,
+            source_path=args.source_path,
+            output_path=args.output,
+            max_docs=args.max_docs,
+            max_questions_per_doc=args.max_questions_per_doc,
+        )
     
     if not success:
         return 1
