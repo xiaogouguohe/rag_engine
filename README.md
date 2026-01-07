@@ -206,6 +206,24 @@ print(f"向量维度: {len(vecs[0])}, 向量数量: {len(vecs)}")
 
 ### 使用示例（完整 RAG 流程）
 
+#### 方式一：使用命令行工具（推荐）
+
+```bash
+# 1. 加载单个文档（自动触发解析、切块、向量化、存储）
+python main.py ingest --kb-id my_kb --file path/to/document.md
+
+# 2. 批量加载目录中的所有文档
+python main.py ingest --kb-id my_kb --dir path/to/docs
+
+# 3. 查询知识库
+python main.py query --kb-id my_kb --question "什么是 RAG？"
+
+# 4. 查看知识库统计信息
+python main.py stats --kb-id my_kb
+```
+
+#### 方式二：使用 Python API
+
 ```python
 from rag import RAGEngine
 
@@ -213,13 +231,14 @@ from rag import RAGEngine
 engine = RAGEngine(kb_id="my_knowledge_base")
 
 # 1. 处理文档（解析 → 分块 → 向量化 → 存储）
+# 调用 ingest_document 会自动触发整个流程
 result = engine.ingest_document("example.txt")
 print(f"文档处理完成，共 {result['chunks_count']} 个块")
 
 # 2. 问答（问题 → 向量化 → 检索 → 生成回答）
 answer = engine.query("什么是 RAG？", top_k=5)
 print(f"回答: {answer['answer']}")
-print(f"参考了 {len(answer['sources'])} 个文档片段")
+print(f"参考了 {len(answer.get('chunks', []))} 个文档片段")
 
 # 3. 查看统计信息
 stats = engine.get_stats()
@@ -228,15 +247,77 @@ print(f"知识库中有 {stats['vector_count']} 个向量")
 
 ### 完整流程说明
 
-**文档处理流程：**
+**文档处理流程（触发方式：`engine.ingest_document(file_path)` 或 `python main.py ingest`）：**
 ```
 文档文件 → Parser → 文本内容 → Chunker → 文本块 → Embedding → 向量 → VectorStore → 存储
 ```
 
-**问答流程：**
+**问答流程（触发方式：`engine.query(question)` 或 `python main.py query`）：**
 ```
 用户问题 → Embedding → 查询向量 → VectorStore → 检索相关块 → 拼接上下文 → LLM → 生成回答
 ```
+
+### 如何触发知识库的加载和切块？
+
+**关键方法：`RAGEngine.ingest_document(file_path)`**
+
+当你调用这个方法时，会自动触发以下流程：
+
+1. **解析文档**：根据文件类型（TXT/Markdown）选择合适的解析器
+2. **切块**：
+   - 如果是 Markdown 且启用标题分割（默认启用），会按标题结构切分（参考 C8）
+   - 否则按固定大小切分
+3. **元数据增强**：提取文件路径信息、内容信息（如难度）等
+4. **向量化**：使用 Embedding 模型将文本块转换为向量
+5. **存储**：将向量和元数据存储到 Milvus Lite 向量数据库
+
+**使用示例：**
+
+```python
+from rag import RAGEngine
+
+# 初始化引擎
+engine = RAGEngine(kb_id="my_kb")
+
+# 触发加载和切块（一行代码完成所有流程）
+result = engine.ingest_document("document.md")
+# 此时文档已经被解析、切块、向量化并存储到向量数据库
+
+# 或者使用命令行
+# python main.py ingest --kb-id my_kb --file document.md
+```
+
+### 从 GitHub 加载知识库示例
+
+如果你想从 GitHub 仓库加载大量文档（如菜谱知识库），可以使用专门的脚本：
+
+**简单方式（推荐）：**
+
+```bash
+# 1. 先 clone 仓库到本地
+cd /Users/xiaogouguohe/workspace
+git clone https://github.com/Anduin2017/HowToCook.git
+
+# 2. 使用启动脚本加载所有 .md 文件
+cd rag_engine
+python load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
+```
+
+**高级方式（支持更多选项）：**
+
+```bash
+# 从本地目录加载
+python scripts/load_github_recipes.py --kb-id recipes_kb --local-dir /path/to/HowToCook/dishes
+
+# 自动 clone 并加载
+python scripts/load_github_recipes.py --kb-id recipes_kb --github-url https://github.com/Anduin2017/HowToCook --subdir dishes
+```
+
+脚本会自动：
+- 递归查找所有 `.md` 文件（`load_recipes.py` 只加载 .md）
+- 批量加载到知识库
+- 显示加载进度和统计信息
+- 支持 Markdown 标题分割（默认启用，适合菜谱结构）
 
 现在你有了一个完整的、可用的 RAG 系统！
 
