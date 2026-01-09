@@ -263,6 +263,131 @@ class VectorStore:
         if kb_id in self._collections:
             del self._collections[kb_id]
     
+    def get_all_chunks(self, kb_id: str, limit: Optional[int] = None) -> List[ChunkMetadata]:
+        """
+        获取知识库中的所有 chunks（用于测试集生成等场景）。
+        
+        Args:
+            kb_id: 知识库 ID
+            limit: 限制返回的 chunks 数量（None 表示不限制）
+        
+        Returns:
+            ChunkMetadata 列表
+        """
+        collection_name = self._get_collection_name(kb_id)
+        
+        if not self.client.has_collection(collection_name):
+            return []
+        
+        try:
+            # 使用 Milvus 的 query 功能获取所有数据
+            # 注意：Milvus Lite 的 query 可能需要指定 limit，如果没有 limit 参数，我们使用一个很大的数字
+            query_limit = limit if limit is not None else 100000  # 默认最多 10 万条
+            
+            results = self.client.query(
+                collection_name=collection_name,
+                filter="",  # 不过滤，获取所有
+                limit=query_limit,
+                output_fields=["text", "metadata"],
+            )
+            
+            chunks = []
+            for result in results:
+                text = result.get("text", "")
+                metadata_str = result.get("metadata", "{}")
+                
+                # 解析元数据
+                try:
+                    metadata_dict = json.loads(metadata_str)
+                except Exception:
+                    metadata_dict = {}
+                
+                chunk_metadata = ChunkMetadata(
+                    chunk_id=metadata_dict.get("chunk_id", ""),
+                    doc_id=metadata_dict.get("doc_id", ""),
+                    kb_id=metadata_dict.get("kb_id", kb_id),
+                    text=text,
+                    page_num=metadata_dict.get("page_num"),
+                    position=metadata_dict.get("position"),
+                    metadata={k: v for k, v in metadata_dict.items() 
+                             if k not in ["chunk_id", "doc_id", "kb_id", "page_num", "position"]},
+                )
+                chunks.append(chunk_metadata)
+            
+            return chunks
+        except Exception as e:
+            raise RuntimeError(f"从 Milvus 获取所有 chunks 失败: {str(e)}") from e
+    
+    def list_all_knowledge_bases(self) -> List[Dict[str, Any]]:
+        """
+        列出向量数据库中的所有知识库。
+        
+        Returns:
+            知识库信息列表，每个元素包含：
+            {
+                "kb_id": str,  # 从 collection 名称推断
+                "collection_name": str,
+                "vector_count": int,
+                "vector_dim": int,
+            }
+        """
+        try:
+            # 获取所有 collection 名称
+            collection_names = self.client.list_collections()
+            
+            kb_list = []
+            for collection_name in collection_names:
+                # 从 collection 名称推断 kb_id（格式：kb_{kb_id}）
+                if collection_name.startswith("kb_"):
+                    kb_id = collection_name[3:].replace("_", "-").replace("_", ".")
+                else:
+                    kb_id = collection_name
+                
+                # 获取统计信息
+                stats = self.get_stats(kb_id)
+                kb_list.append(stats)
+            
+            return kb_list
+        except Exception as e:
+            raise RuntimeError(f"列出知识库失败: {str(e)}") from e
+    
+    def get_document_list(self, kb_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        获取知识库中的文档列表（按 doc_id 分组）。
+        
+        Args:
+            kb_id: 知识库 ID
+            limit: 限制返回的文档数量
+        
+        Returns:
+            文档信息列表，每个元素包含：
+            {
+                "doc_id": str,
+                "chunks_count": int,
+                "first_chunk_preview": str,  # 第一个 chunk 的前 100 字符
+            }
+        """
+        chunks = self.get_all_chunks(kb_id, limit=limit * 10)  # 获取更多 chunks 以确保有足够的文档
+        
+        from collections import defaultdict
+        docs_by_id = defaultdict(list)
+        for chunk in chunks:
+            docs_by_id[chunk.doc_id].append(chunk)
+        
+        doc_list = []
+        for doc_id, chunks_list in list(docs_by_id.items())[:limit]:
+            # 按 position 排序
+            chunks_sorted = sorted(chunks_list, key=lambda c: c.position if c.position is not None else 0)
+            first_chunk_text = chunks_sorted[0].text if chunks_sorted else ""
+            
+            doc_list.append({
+                "doc_id": doc_id,
+                "chunks_count": len(chunks_list),
+                "first_chunk_preview": first_chunk_text[:100] + "..." if len(first_chunk_text) > 100 else first_chunk_text,
+            })
+        
+        return doc_list
+    
     def get_stats(self, kb_id: str) -> Dict[str, Any]:
         """获取知识库的统计信息（参考 cloud-edge-milk-tea-agent 的实现）"""
         collection_name = self._get_collection_name(kb_id)

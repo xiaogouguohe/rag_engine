@@ -243,23 +243,40 @@ def generate_ragas_dataset_with_knowledge_graph(
     print("=" * 60)
     
     # 1. 确定源路径（复用原有逻辑）
+    source_dir = None
     if source_path:
         source_dir = Path(source_path)
     else:
-        try:
-            app_config = AppConfig.load()
-            if app_config.knowledge_bases:
-                kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
+        # 方式1：从 knowledge_bases.json 读取
+        kb_json_path = Path("knowledge_bases.json")
+        if kb_json_path.exists():
+            try:
+                with open(kb_json_path, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
+                kb_config = next((kb for kb in config_data.get("knowledge_bases", []) if kb.get("kb_id") == kb_id), None)
                 if kb_config:
-                    source_dir = Path(kb_config.source_path)
-                else:
-                    print(f"❌ 未找到知识库配置: {kb_id}")
-                    return False
-            else:
-                print(f"❌ 未找到知识库配置")
-                return False
-        except Exception as e:
-            print(f"❌ 加载配置文件失败: {e}")
+                    source_dir = Path(kb_config["source_path"])
+            except Exception as e:
+                print(f"⚠️  读取 knowledge_bases.json 失败: {e}")
+        
+        # 方式2：从环境变量配置读取
+        if source_dir is None:
+            try:
+                app_config = AppConfig.load()
+                if app_config.knowledge_bases:
+                    kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
+                    if kb_config:
+                        source_dir = Path(kb_config.source_path)
+            except Exception as e:
+                print(f"⚠️  读取环境变量配置失败: {e}")
+        
+        # 如果还是找不到，报错
+        if source_dir is None:
+            print(f"❌ 未找到知识库配置: {kb_id}")
+            print(f"   请检查：")
+            print(f"   1. knowledge_bases.json 文件是否存在且包含 {kb_id}")
+            print(f"   2. 或使用 --source-path 参数指定路径")
+            print(f"   3. 或配置环境变量 RAG_KNOWLEDGE_BASES")
             return False
     
     if not source_dir.exists():
@@ -267,35 +284,87 @@ def generate_ragas_dataset_with_knowledge_graph(
         return False
     
     print(f"知识库 ID: {kb_id}")
-    print(f"源路径: {source_dir}")
-    print(f"处理文档数: {max_docs}")
-    print(f"每个文档问题数: {num_questions_per_doc}")
     print(f"使用知识图谱: {use_kg}")
     print("-" * 60)
     
-    # 2. 查找文档
-    print("正在扫描文档...")
-    md_files = find_markdown_files(source_dir)
-    
-    if max_docs:
-        md_files = md_files[:max_docs]
-    
-    if not md_files:
-        print("❌ 未找到 .md 文件")
-        return False
-    
-    print(f"✅ 找到 {len(md_files)} 个文档")
-    print("-" * 60)
-    
-    # 3. 转换为 langchain Document 格式
-    print("正在转换文档格式...")
-    langchain_docs = convert_documents_to_langchain_docs(md_files)
-    
-    if not langchain_docs:
-        print("❌ 文档转换失败")
-        return False
-    
-    print(f"✅ 成功转换 {len(langchain_docs)} 个文档")
+    # 2. 从向量数据库读取文档
+    print("正在从向量数据库读取文档...")
+    try:
+        from vector_store import VectorStore
+        from config import AppConfig
+        
+        app_config = AppConfig.load()
+        vector_store = VectorStore(storage_path=app_config.storage_path)
+        
+        # 获取所有 chunks
+        all_chunks = vector_store.get_all_chunks(kb_id)
+        
+        if not all_chunks:
+            print("❌ 向量数据库中未找到任何文档")
+            print("   请确保知识库已索引文档")
+            return False
+        
+        print(f"✅ 从向量数据库获取到 {len(all_chunks)} 个 chunks")
+        
+        # 按 doc_id 分组，重新组合成完整文档
+        from collections import defaultdict
+        docs_by_id = defaultdict(list)
+        for chunk in all_chunks:
+            docs_by_id[chunk.doc_id].append(chunk)
+        
+        # 转换为 langchain Document 格式
+        langchain_docs = []
+        for doc_id, chunks in docs_by_id.items():
+            # 按 position 排序（如果有）
+            chunks_sorted = sorted(chunks, key=lambda c: c.position if c.position is not None else 0)
+            # 组合成完整文档
+            full_text = "\n\n".join([chunk.text for chunk in chunks_sorted])
+            
+            # 创建 langchain Document
+            from langchain_core.documents import Document as LangchainDocument
+            doc = LangchainDocument(
+                page_content=full_text,
+                metadata={
+                    "doc_id": doc_id,
+                    "kb_id": kb_id,
+                    "chunks_count": len(chunks),
+                }
+            )
+            langchain_docs.append(doc)
+        
+        # 限制文档数量
+        if max_docs:
+            langchain_docs = langchain_docs[:max_docs]
+        
+        print(f"✅ 成功组合成 {len(langchain_docs)} 个文档（来自 {len(all_chunks)} 个 chunks）")
+        
+    except Exception as e:
+        print(f"❌ 从向量数据库读取文档失败: {e}")
+        print("   回退到从文件系统读取...")
+        import traceback
+        traceback.print_exc()
+        
+        # 回退到文件系统读取
+        if not source_dir or not source_dir.exists():
+            print("❌ 无法从向量数据库读取，且源路径不存在")
+            return False
+        
+        md_files = find_markdown_files(source_dir)
+        if max_docs:
+            md_files = md_files[:max_docs]
+        
+        if not md_files:
+            print("❌ 未找到 .md 文件")
+            return False
+        
+        print(f"✅ 从文件系统找到 {len(md_files)} 个文档")
+        langchain_docs = convert_documents_to_langchain_docs(md_files)
+        
+        if not langchain_docs:
+            print("❌ 文档转换失败")
+            return False
+        
+        print(f"✅ 成功转换 {len(langchain_docs)} 个文档")
     print("-" * 60)
     
     # 4. 加载配置和初始化
@@ -379,10 +448,14 @@ def generate_ragas_dataset_with_knowledge_graph(
                 
                 # 5.3 创建提取器
                 print("  步骤 2: 创建提取器...")
-                # 使用 NER 提取器提取命名实体
-                ner_extractor = NERExtractor()
-                # 使用关键词提取器提取关键词
-                keyphrase_extractor = KeyphrasesExtractor()
+                # 需要为提取器创建 RAGAS LLM
+                from ragas.llms import LangchainLLMWrapper
+                ragas_llm_for_extractors = LangchainLLMWrapper(generator_llm)
+                
+                # 使用 NER 提取器提取命名实体（需要传入 LLM）
+                ner_extractor = NERExtractor(llm=ragas_llm_for_extractors)
+                # 使用关键词提取器提取关键词（需要传入 LLM）
+                keyphrase_extractor = KeyphrasesExtractor(llm=ragas_llm_for_extractors)
                 print("  ✅ 创建了 NER 提取器和关键词提取器")
                 
                 # 5.4 创建关系构建器
