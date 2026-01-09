@@ -206,6 +206,376 @@ def convert_documents_to_langchain_docs(file_paths: List[Path]) -> List[Langchai
     return langchain_docs
 
 
+def generate_ragas_dataset_with_knowledge_graph(
+    kb_id: str,
+    source_path: Optional[str] = None,
+    output_path: str = "ragas_testset_dataset_kg.json",
+    max_docs: int = 5,
+    num_questions_per_doc: int = 3,
+    use_kg: bool = True,
+) -> bool:
+    """
+    使用 RAGAS TestsetGenerator 和知识图谱生成测试集（新方法，支持知识图谱）。
+    
+    生成的数据格式：
+    {
+        "question": str,           # LLM 生成的问题
+        "answer": "",              # 留空，后续用 RAG 生成
+        "ground_truth": str,       # LLM 根据文档生成的参考答案
+        "contexts": List[str],     # RAGAS 确定的相关文档块
+    }
+    
+    Args:
+        kb_id: 知识库 ID
+        source_path: 知识库源路径
+        output_path: 输出文件路径
+        max_docs: 最多处理的文档数（默认 5）
+        num_questions_per_doc: 每个文档生成的问题数（默认 3）
+        use_kg: 是否使用知识图谱（默认 True）
+    """
+    if not _HAS_TESTSET_GENERATOR:
+        print("❌ RAGAS TestsetGenerator 不可用")
+        print("   请确保安装了 RAGAS v0.1.0+ 并包含 testset 模块")
+        return False
+    
+    print("=" * 60)
+    print("使用 RAGAS TestsetGenerator + 知识图谱生成测试集")
+    print("=" * 60)
+    
+    # 1. 确定源路径（复用原有逻辑）
+    if source_path:
+        source_dir = Path(source_path)
+    else:
+        try:
+            app_config = AppConfig.load()
+            if app_config.knowledge_bases:
+                kb_config = next((kb for kb in app_config.knowledge_bases if kb.kb_id == kb_id), None)
+                if kb_config:
+                    source_dir = Path(kb_config.source_path)
+                else:
+                    print(f"❌ 未找到知识库配置: {kb_id}")
+                    return False
+            else:
+                print(f"❌ 未找到知识库配置")
+                return False
+        except Exception as e:
+            print(f"❌ 加载配置文件失败: {e}")
+            return False
+    
+    if not source_dir.exists():
+        print(f"❌ 源路径不存在: {source_dir}")
+        return False
+    
+    print(f"知识库 ID: {kb_id}")
+    print(f"源路径: {source_dir}")
+    print(f"处理文档数: {max_docs}")
+    print(f"每个文档问题数: {num_questions_per_doc}")
+    print(f"使用知识图谱: {use_kg}")
+    print("-" * 60)
+    
+    # 2. 查找文档
+    print("正在扫描文档...")
+    md_files = find_markdown_files(source_dir)
+    
+    if max_docs:
+        md_files = md_files[:max_docs]
+    
+    if not md_files:
+        print("❌ 未找到 .md 文件")
+        return False
+    
+    print(f"✅ 找到 {len(md_files)} 个文档")
+    print("-" * 60)
+    
+    # 3. 转换为 langchain Document 格式
+    print("正在转换文档格式...")
+    langchain_docs = convert_documents_to_langchain_docs(md_files)
+    
+    if not langchain_docs:
+        print("❌ 文档转换失败")
+        return False
+    
+    print(f"✅ 成功转换 {len(langchain_docs)} 个文档")
+    print("-" * 60)
+    
+    # 4. 加载配置和初始化
+    print("初始化 RAGAS TestsetGenerator...")
+    try:
+        app_config = AppConfig.load()
+        
+        try:
+            from langchain_openai import ChatOpenAI
+            from ragas.embeddings import OpenAIEmbeddings
+        except ImportError:
+            print("❌ 需要安装 langchain-openai")
+            print("   请运行: pip install langchain-openai")
+            return False
+        
+        # 创建 langchain LLM
+        generator_llm = ChatOpenAI(
+            model=app_config.llm.model,
+            api_key=app_config.llm.api_key,
+            base_url=app_config.llm.base_url,
+            temperature=0.1,
+            timeout=120.0,
+            max_retries=3,
+        )
+        
+        # 创建 Embeddings
+        try:
+            from openai import OpenAI, AsyncOpenAI
+            from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
+            
+            openai_client = OpenAI(
+                api_key=app_config.embedding.api_key,
+                base_url=app_config.embedding.base_url,
+            )
+            async_openai_client = AsyncOpenAI(
+                api_key=app_config.embedding.api_key,
+                base_url=app_config.embedding.base_url,
+            )
+            
+            embeddings = RagasOpenAIEmbeddings(
+                client=openai_client,
+                model=app_config.embedding.model,
+            )
+            if hasattr(embeddings, 'async_client'):
+                embeddings.async_client = async_openai_client
+            
+            print("✅ 使用 RAGAS 原生的 OpenAIEmbeddings")
+        except Exception as e:
+            print(f"❌ 创建 Embeddings 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # 5. 构建知识图谱（如果启用）
+        knowledge_graph = None
+        if use_kg:
+            print("-" * 60)
+            print("正在构建知识图谱...")
+            try:
+                from ragas.testset.graph import KnowledgeGraph, Node, NodeType
+                from ragas.testset.transforms.extractors import NERExtractor, KeyphrasesExtractor
+                from ragas.testset.transforms.relationship_builders.traditional import JaccardSimilarityBuilder
+                from ragas.testset.transforms import apply_transforms, Parallel
+                import asyncio
+                
+                # 5.1 从文档创建节点
+                print("  步骤 1: 从文档创建节点...")
+                nodes = []
+                for doc in langchain_docs:
+                    node = Node(
+                        properties={"page_content": doc.page_content},
+                        type=NodeType.CHUNK
+                    )
+                    nodes.append(node)
+                
+                print(f"  ✅ 创建了 {len(nodes)} 个节点")
+                
+                # 5.2 创建知识图谱
+                kg = KnowledgeGraph(nodes=nodes)
+                print("  ✅ 创建知识图谱对象")
+                
+                # 5.3 创建提取器
+                print("  步骤 2: 创建提取器...")
+                # 使用 NER 提取器提取命名实体
+                ner_extractor = NERExtractor()
+                # 使用关键词提取器提取关键词
+                keyphrase_extractor = KeyphrasesExtractor()
+                print("  ✅ 创建了 NER 提取器和关键词提取器")
+                
+                # 5.4 创建关系构建器
+                print("  步骤 3: 创建关系构建器...")
+                # 基于实体相似度构建关系
+                rel_builder = JaccardSimilarityBuilder(
+                    property_name="entities",
+                    key_name="PER",  # 基于人名实体
+                    new_property_name="entity_jaccard_similarity"
+                )
+                print("  ✅ 创建了基于实体相似度的关系构建器")
+                
+                # 5.5 应用 transforms（提取器和关系构建器）
+                print("  步骤 4: 应用 transforms（提取信息和构建关系）...")
+                transforms = [
+                    Parallel(
+                        ner_extractor,
+                        keyphrase_extractor
+                    ),
+                    rel_builder
+                ]
+                
+                # 异步执行 transforms
+                async def build_kg():
+                    await apply_transforms(kg, transforms)
+                    return kg
+                
+                knowledge_graph = asyncio.run(build_kg())
+                
+                # 统计关系数量
+                num_relationships = len(knowledge_graph.relationships)
+                print(f"  ✅ 知识图谱构建完成")
+                print(f"     节点数: {len(knowledge_graph.nodes)}")
+                print(f"     关系数: {num_relationships}")
+                
+                if num_relationships == 0:
+                    print("  ⚠️  警告: 未找到任何关系，可能因为：")
+                    print("     1. 文档之间没有共享的实体")
+                    print("     2. 文档内容差异太大")
+                    print("     3. 提取器未能提取到相关实体")
+                    print("     继续使用知识图谱，但多跳查询可能效果不佳")
+                
+            except Exception as e:
+                print(f"  ⚠️  构建知识图谱失败: {e}")
+                print("     将回退到不使用知识图谱的模式")
+                import traceback
+                traceback.print_exc()
+                knowledge_graph = None
+                use_kg = False
+        else:
+            print("ℹ️  跳过知识图谱构建（use_kg=False）")
+        
+        print("-" * 60)
+        
+        # 6. 创建 TestsetGenerator
+        try:
+            if knowledge_graph is not None:
+                # 使用知识图谱创建 TestsetGenerator
+                generator = TestsetGenerator.from_langchain(
+                    llm=generator_llm,
+                    embedding_model=embeddings,
+                    knowledge_graph=knowledge_graph,
+                )
+                print("✅ TestsetGenerator 初始化成功（带知识图谱）")
+            else:
+                # 不使用知识图谱
+                generator = TestsetGenerator.from_langchain(
+                    llm=generator_llm,
+                    embedding_model=embeddings,
+                )
+                print("✅ TestsetGenerator 初始化成功（无知识图谱）")
+        except Exception as e:
+            print(f"❌ 创建 TestsetGenerator 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        print("-" * 60)
+        
+        # 7. 生成测试集
+        total_questions = max_docs * num_questions_per_doc
+        print(f"开始生成测试集（目标: {total_questions} 个问题）...")
+        
+        try:
+            kwargs = {
+                "documents": langchain_docs,
+                "testset_size": total_questions,
+                "transforms_embedding_model": embeddings,
+                "raise_exceptions": False,
+            }
+            
+            testset = generator.generate_with_langchain_docs(**kwargs)
+        except Exception as e:
+            print(f"❌ 生成测试集失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        if not testset:
+            print("❌ 未生成任何测试样本")
+            return False
+        
+        # 转换为 DataFrame
+        try:
+            testset_df = testset.to_pandas()
+        except Exception as e:
+            print(f"⚠️  无法转换为 DataFrame: {e}")
+            testset_df = None
+        
+        if testset_df is not None:
+            num_samples = len(testset_df)
+            print(f"✅ 成功生成 {num_samples} 个测试样本")
+        else:
+            num_samples = len(testset.questions) if hasattr(testset, 'questions') else 0
+            print(f"✅ 成功生成 {num_samples} 个测试样本（通过属性访问）")
+        
+        print("-" * 60)
+        
+        # 8. 转换为目标格式
+        print("正在转换数据格式...")
+        samples = []
+        
+        if testset_df is not None:
+            for _, row in testset_df.iterrows():
+                sample = {
+                    "question": row.get("user_input", row.get("question", "")),
+                    "answer": "",
+                    "ground_truth": row.get("reference", row.get("ground_truth", "")),
+                    "contexts": row.get("reference_contexts", row.get("contexts", [])),
+                }
+                samples.append(sample)
+        else:
+            questions = getattr(testset, 'questions', getattr(testset, 'user_input', []))
+            ground_truths = getattr(testset, 'ground_truth', getattr(testset, 'reference', []))
+            contexts_list = getattr(testset, 'contexts', getattr(testset, 'reference_contexts', []))
+            
+            for i in range(len(questions)):
+                sample = {
+                    "question": questions[i] if i < len(questions) else "",
+                    "answer": "",
+                    "ground_truth": ground_truths[i] if i < len(ground_truths) else "",
+                    "contexts": contexts_list[i] if i < len(contexts_list) else [],
+                }
+                samples.append(sample)
+        
+        # 9. 保存结果
+        output_data = {
+            "metadata": {
+                "kb_id": kb_id,
+                "source_path": str(source_dir),
+                "generated_at": str(Path.cwd()),
+                "total_samples": len(samples),
+                "generation_method": "ragas_testset_generator_with_kg" if use_kg else "ragas_testset_generator",
+                "use_knowledge_graph": use_kg,
+            },
+            "samples": samples,
+        }
+        
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ 测试集已保存到: {output_file}")
+        print(f"   样本数: {len(samples)}")
+        print(f"   使用知识图谱: {use_kg}")
+        
+        # 10. 预览
+        preview_count = min(3, len(samples))
+        if preview_count > 0:
+            print("\n测试集预览 (前 3 个样本):")
+            for i, sample in enumerate(samples[:preview_count]):
+                print(f"\n样本 {i+1}:")
+                print(f"  问题: {sample['question']}")
+                print(f"  标准答案 (ground_truth): {sample.get('ground_truth', '')[:100] if sample.get('ground_truth') else '(无)'}{'...' if sample.get('ground_truth') and len(sample.get('ground_truth', '')) > 100 else ''}")
+                contexts = sample.get('contexts', [])
+                print(f"  上下文 (contexts): {len(contexts)} 个文档块")
+                if contexts:
+                    print(f"    第一个上下文: {contexts[0][:100] if isinstance(contexts[0], str) else str(contexts[0])[:100]}{'...' if len(str(contexts[0])) > 100 else ''}")
+        
+        if len(samples) > preview_count:
+            print(f"\n... 还有 {len(samples) - preview_count} 个样本未显示")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 生成测试集时出错: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def generate_ragas_dataset_with_testset_generator(
     kb_id: str,
     source_path: Optional[str] = None,
@@ -1459,6 +1829,11 @@ def main():
         action="store_true",
         help="使用 RAGAS TestsetGenerator 生成测试集（新方法，推荐）",
     )
+    parser.add_argument(
+        "--use-kg",
+        action="store_true",
+        help="使用知识图谱生成测试集（需要 --use-testset-generator，可以提高多跳查询质量）",
+    )
     
     args = parser.parse_args()
     
@@ -1473,13 +1848,25 @@ def main():
     # 生成数据集
     if args.use_testset_generator:
         # 使用 RAGAS TestsetGenerator（新方法）
-        success = generate_ragas_dataset_with_testset_generator(
-            kb_id=args.kb_id,
-            source_path=args.source_path,
-            output_path=args.output,
-            max_docs=args.max_docs or 5,
-            num_questions_per_doc=args.max_questions_per_doc or 3,
-        )
+        if args.use_kg:
+            # 使用知识图谱版本
+            success = generate_ragas_dataset_with_knowledge_graph(
+                kb_id=args.kb_id,
+                source_path=args.source_path,
+                output_path=args.output,
+                max_docs=args.max_docs or 5,
+                num_questions_per_doc=args.max_questions_per_doc or 3,
+                use_kg=True,
+            )
+        else:
+            # 不使用知识图谱版本
+            success = generate_ragas_dataset_with_testset_generator(
+                kb_id=args.kb_id,
+                source_path=args.source_path,
+                output_path=args.output,
+                max_docs=args.max_docs or 5,
+                num_questions_per_doc=args.max_questions_per_doc or 3,
+            )
     else:
         # 使用原有方法
         success = generate_ragas_dataset(
