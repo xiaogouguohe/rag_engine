@@ -269,10 +269,13 @@ class VectorStore:
         
         Args:
             kb_id: 知识库 ID
-            limit: 限制返回的 chunks 数量（None 表示不限制）
+            limit: 限制返回的 chunks 数量（None 表示使用最大 limit 16384）
         
         Returns:
             ChunkMetadata 列表
+        
+        Note:
+            Milvus 的 limit 范围是 [1, 16384]。如果数据量超过 16384，需要多次调用此方法。
         """
         collection_name = self._get_collection_name(kb_id)
         
@@ -280,9 +283,12 @@ class VectorStore:
             return []
         
         try:
-            # 使用 Milvus 的 query 功能获取所有数据
-            # 注意：Milvus Lite 的 query 可能需要指定 limit，如果没有 limit 参数，我们使用一个很大的数字
-            query_limit = limit if limit is not None else 100000  # 默认最多 10 万条
+            # Milvus 的 limit 范围是 [1, 16384]
+            MAX_MILVUS_LIMIT = 16384
+            
+            # 如果指定了 limit，确保不超过 Milvus 的最大值
+            # 如果没有指定 limit，使用最大 limit
+            query_limit = min(limit, MAX_MILVUS_LIMIT) if limit is not None else MAX_MILVUS_LIMIT
             
             results = self.client.query(
                 collection_name=collection_name,

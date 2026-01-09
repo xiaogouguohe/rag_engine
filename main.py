@@ -114,14 +114,26 @@ def ingest_directory(kb_id: str, dir_path: str, pattern: str = "**/*", **kwargs)
     success_count = 0
     fail_count = 0
     
+    import time
+    total_start = time.time()
+    
     for i, file_path in enumerate(files, 1):
-        print(f"\n[{i}/{len(files)}] 处理: {file_path.name}")
+        print(f"\n{'='*60}")
+        print(f"[{i}/{len(files)}] 处理文档: {file_path.name}")
+        print(f"{'='*60}")
+        
+        file_start = time.time()
         try:
-            result = engine.ingest_document(file_path)
-            print(f"  ✅ 成功 - 分块数: {result['chunks_count']}")
+            result = engine.ingest_document(file_path, verbose=True)
+            file_time = time.time() - file_start
+            print(f"\n✅ 文档处理成功 - 分块数: {result['chunks_count']}, 总耗时: {file_time:.2f} 秒")
             success_count += 1
         except Exception as e:
-            print(f"  ❌ 失败: {e}")
+            file_time = time.time() - file_start
+            print(f"\n❌ 文档处理失败，耗时: {file_time:.2f} 秒")
+            print(f"   错误: {e}")
+            import traceback
+            traceback.print_exc()
             fail_count += 1
     
     print("\n" + "=" * 60)

@@ -270,18 +270,11 @@ def generate_ragas_dataset_with_knowledge_graph(
             except Exception as e:
                 print(f"⚠️  读取环境变量配置失败: {e}")
         
-        # 如果还是找不到，报错
-        if source_dir is None:
-            print(f"❌ 未找到知识库配置: {kb_id}")
-            print(f"   请检查：")
-            print(f"   1. knowledge_bases.json 文件是否存在且包含 {kb_id}")
-            print(f"   2. 或使用 --source-path 参数指定路径")
-            print(f"   3. 或配置环境变量 RAG_KNOWLEDGE_BASES")
-            return False
-    
-    if not source_dir.exists():
-        print(f"❌ 源路径不存在: {source_dir}")
-        return False
+        # 如果还是找不到 source_path，没关系，我们会直接从向量数据库读取
+        # 不需要 source_path 也能工作
+        if source_dir is not None and not source_dir.exists():
+            print(f"⚠️  源路径不存在: {source_dir}，将直接从向量数据库读取")
+            source_dir = None
     
     print(f"知识库 ID: {kb_id}")
     print(f"使用知识图谱: {use_kg}")
