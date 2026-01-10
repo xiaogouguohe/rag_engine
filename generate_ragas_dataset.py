@@ -280,69 +280,14 @@ def generate_ragas_dataset_with_knowledge_graph(
     print(f"使用知识图谱: {use_kg}")
     print("-" * 60)
     
-    # 2. 从向量数据库读取文档
-    print("正在从向量数据库读取文档...")
-    try:
-        from vector_store import VectorStore
-        from config import AppConfig
-        
-        app_config = AppConfig.load()
-        vector_store = VectorStore(storage_path=app_config.storage_path)
-        
-        # 获取所有 chunks
-        all_chunks = vector_store.get_all_chunks(kb_id)
-        
-        if not all_chunks:
-            print("❌ 向量数据库中未找到任何文档")
-            print("   请确保知识库已索引文档")
-            return False
-        
-        print(f"✅ 从向量数据库获取到 {len(all_chunks)} 个 chunks")
-        
-        # 按 doc_id 分组，重新组合成完整文档
-        from collections import defaultdict
-        docs_by_id = defaultdict(list)
-        for chunk in all_chunks:
-            docs_by_id[chunk.doc_id].append(chunk)
-        
-        # 转换为 langchain Document 格式
-        langchain_docs = []
-        for doc_id, chunks in docs_by_id.items():
-            # 按 position 排序（如果有）
-            chunks_sorted = sorted(chunks, key=lambda c: c.position if c.position is not None else 0)
-            # 组合成完整文档
-            full_text = "\n\n".join([chunk.text for chunk in chunks_sorted])
-            
-            # 创建 langchain Document
-            from langchain_core.documents import Document as LangchainDocument
-            doc = LangchainDocument(
-                page_content=full_text,
-                metadata={
-                    "doc_id": doc_id,
-                    "kb_id": kb_id,
-                    "chunks_count": len(chunks),
-                }
-            )
-            langchain_docs.append(doc)
-        
-        # 限制文档数量
-        if max_docs:
-            langchain_docs = langchain_docs[:max_docs]
-        
-        print(f"✅ 成功组合成 {len(langchain_docs)} 个文档（来自 {len(all_chunks)} 个 chunks）")
-        
-    except Exception as e:
-        print(f"❌ 从向量数据库读取文档失败: {e}")
-        print("   回退到从文件系统读取...")
-        import traceback
-        traceback.print_exc()
-        
-        # 回退到文件系统读取
-        if not source_dir or not source_dir.exists():
-            print("❌ 无法从向量数据库读取，且源路径不存在")
-            return False
-        
+    # 2. 读取文档（优先从文件系统读取，如果提供了 source_path）
+    langchain_docs = []
+    
+    # 如果提供了 source_path，优先从文件系统读取
+    if source_dir and source_dir.exists():
+        print("从文件系统读取文档...")
         md_files = find_markdown_files(source_dir)
+        
         if max_docs:
             md_files = md_files[:max_docs]
         
@@ -358,6 +303,74 @@ def generate_ragas_dataset_with_knowledge_graph(
             return False
         
         print(f"✅ 成功转换 {len(langchain_docs)} 个文档")
+    else:
+        # 如果没有提供 source_path，尝试从向量数据库读取
+        print("从向量数据库读取文档...")
+        try:
+            from vector_store import VectorStore
+            
+            app_config = AppConfig.load()
+            vector_store = VectorStore(storage_path=app_config.storage_path)
+            
+            # 获取所有 chunks
+            all_chunks = vector_store.get_all_chunks(kb_id)
+            
+            if not all_chunks:
+                print("❌ 向量数据库中未找到任何文档")
+                print("   请确保知识库已索引文档或提供 --source-path 参数")
+                return False
+            
+            print(f"✅ 从向量数据库获取到 {len(all_chunks)} 个 chunks")
+            
+            # 按 doc_id 分组，重新组合成完整文档
+            from collections import defaultdict
+            docs_by_id = defaultdict(list)
+            for chunk in all_chunks:
+                docs_by_id[chunk.doc_id].append(chunk)
+            
+            # 转换为 langchain Document 格式
+            langchain_docs = []
+            for doc_id, chunks in docs_by_id.items():
+                # 按 position 排序（如果有）
+                chunks_sorted = sorted(chunks, key=lambda c: c.position if c.position is not None else 0)
+                # 组合成完整文档
+                full_text = "\n\n".join([chunk.text for chunk in chunks_sorted])
+                
+                # 创建 langchain Document
+                from langchain_core.documents import Document as LangchainDocument
+                doc = LangchainDocument(
+                    page_content=full_text,
+                    metadata={
+                        "doc_id": doc_id,
+                        "kb_id": kb_id,
+                        "chunks_count": len(chunks),
+                    }
+                )
+                langchain_docs.append(doc)
+            
+            # 限制文档数量
+            if max_docs:
+                langchain_docs = langchain_docs[:max_docs]
+            
+            print(f"✅ 成功组合成 {len(langchain_docs)} 个文档（来自 {len(all_chunks)} 个 chunks）")
+            
+            # 检查文档数量是否合理
+            if len(langchain_docs) < 3:
+                print(f"⚠️  警告: 从向量数据库只读取到 {len(langchain_docs)} 个文档，少于 3 个可能无法生成测试集")
+                print("   建议: 使用 --source-path 参数直接从文件系统读取")
+            
+        except Exception as e:
+            print(f"❌ 从向量数据库读取文档失败: {e}")
+            print("   请提供 --source-path 参数从文件系统读取")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    # 检查文档数量
+    if len(langchain_docs) < 3:
+        print(f"⚠️  警告: 只有 {len(langchain_docs)} 个文档，RAGAS 需要至少 3 个文档才能形成聚类")
+        print("   继续尝试生成测试集...")
+    
     print("-" * 60)
     
     # 4. 加载配置和初始化
@@ -427,13 +440,14 @@ def generate_ragas_dataset_with_knowledge_graph(
                 print("  步骤 1: 从文档创建节点...")
                 nodes = []
                 for doc in langchain_docs:
+                    # 关键修改：将类型设为 DOCUMENT，以便 RAGAS 的 Persona 提取器能识别
                     node = Node(
                         properties={"page_content": doc.page_content},
-                        type=NodeType.CHUNK
+                        type=NodeType.DOCUMENT
                     )
                     nodes.append(node)
                 
-                print(f"  ✅ 创建了 {len(nodes)} 个节点")
+                print(f"  ✅ 创建了 {len(nodes)} 个节点 (类型: DOCUMENT)")
                 
                 # 5.2 创建知识图谱
                 kg = KnowledgeGraph(nodes=nodes)
@@ -441,42 +455,89 @@ def generate_ragas_dataset_with_knowledge_graph(
                 
                 # 5.3 创建提取器
                 print("  步骤 2: 创建提取器...")
-                # 需要为提取器创建 RAGAS LLM
                 from ragas.llms import LangchainLLMWrapper
                 ragas_llm_for_extractors = LangchainLLMWrapper(generator_llm)
                 
-                # 使用 NER 提取器提取命名实体（需要传入 LLM）
                 ner_extractor = NERExtractor(llm=ragas_llm_for_extractors)
-                # 使用关键词提取器提取关键词（需要传入 LLM）
                 keyphrase_extractor = KeyphrasesExtractor(llm=ragas_llm_for_extractors)
                 print("  ✅ 创建了 NER 提取器和关键词提取器")
                 
+                # --- 补丁：自定义格式转换器，修复 RAGAS 官方 list/dict 不匹配 bug ---
+                from ragas.testset.transforms.base import BaseGraphTransformation
+                from dataclasses import dataclass
+                import typing as t
+                
+                @dataclass
+                class EntityFormatFixer(BaseGraphTransformation):
+                    async def transform(self, kg: KnowledgeGraph) -> t.Any:
+                        print("    [补丁] 正在修复实体格式并合并所有类别...")
+                        for i, node in enumerate(kg.nodes):
+                            if "entities" in node.properties:
+                                entities = node.properties["entities"]
+                                # 如果是 list，直接包装
+                                if isinstance(entities, list):
+                                    node.properties["entities"] = {"all": entities}
+                                # 如果是 dict，把所有类别的实体合并到一个 "all" 列表里
+                                elif isinstance(entities, dict):
+                                    all_list = []
+                                    for vals in entities.values():
+                                        if isinstance(vals, list):
+                                            all_list.extend(vals)
+                                    node.properties["entities"] = {"all": list(set(all_list))}
+                                
+                                # 调试打印前 2 个节点的内容
+                                if i < 2:
+                                    print(f"      节点 {i} 提取到的部分实体: {node.properties['entities']['all'][:5]}...")
+                        return kg
+                    
+                    def generate_execution_plan(self, kg: KnowledgeGraph) -> t.Sequence[t.Coroutine]:
+                        async def run():
+                            await self.transform(kg)
+                        return [run()]
+                # -----------------------------------------------------------
+
                 # 5.4 创建关系构建器
                 print("  步骤 3: 创建关系构建器...")
-                # 基于实体相似度构建关系
+                from ragas.testset.transforms.relationship_builders.traditional import JaccardSimilarityBuilder
+                
+                # 使用通用的 "all" 键，并显著降低阈值 (threshold)
                 rel_builder = JaccardSimilarityBuilder(
                     property_name="entities",
-                    key_name="PER",  # 基于人名实体
-                    new_property_name="entity_jaccard_similarity"
+                    key_name="all",
+                    new_property_name="entity_jaccard_similarity",
+                    threshold=0.01 # 极其宽容，只要有重合就连线
                 )
-                print("  ✅ 创建了基于实体相似度的关系构建器")
+                print("  ✅ 关系构建器已配置: JaccardSimilarityBuilder (threshold=0.01)")
                 
-                # 5.5 应用 transforms（提取器和关系构建器）
-                print("  步骤 4: 应用 transforms（提取信息和构建关系）...")
+                # 5.5 应用 transforms
+                print("  步骤 4: 执行知识图谱构建流 (提取 -> 修复 -> 连线)...")
+                from ragas.testset.transforms import apply_transforms
                 transforms = [
-                    Parallel(
-                        ner_extractor,
-                        keyphrase_extractor
-                    ),
+                    Parallel(ner_extractor, keyphrase_extractor),
+                    EntityFormatFixer(),
                     rel_builder
                 ]
                 
-                # 异步执行 transforms
-                async def build_kg():
-                    await apply_transforms(kg, transforms)
-                    return kg
+                # 注意：在 RAGAS 0.4.x 中，apply_transforms 是一个同步函数
+                # 它内部会处理异步逻辑，所以这里不需要 await
+                print("    正在执行 LLM 任务并构建节点关系，请稍候...")
+                apply_transforms(kg, transforms)
+                knowledge_graph = kg
                 
-                knowledge_graph = asyncio.run(build_kg())
+                if knowledge_graph:
+                    num_relationships = len(knowledge_graph.relationships)
+                    print(f"  ✅ 知识图谱构建成功 (节点: {len(knowledge_graph.nodes)}, 边: {num_relationships})")
+                else:
+                    print("  ⚠️  知识图谱对象为空，将回退到无知识图谱模式")
+                    use_kg = False
+                
+            except Exception as e:
+                print(f"\n  ❌ 构建知识图谱失败，详细错误堆栈如下:")
+                import traceback
+                traceback.print_exc()
+                print("\n  ⚠️  正在触发紧急回退: 进入【无知识图谱】模式尝试继续...")
+                knowledge_graph = None
+                use_kg = False
                 
                 # 统计关系数量
                 num_relationships = len(knowledge_graph.relationships)
@@ -533,14 +594,92 @@ def generate_ragas_dataset_with_knowledge_graph(
         print(f"开始生成测试集（目标: {total_questions} 个问题）...")
         
         try:
-            kwargs = {
-                "documents": langchain_docs,
-                "testset_size": total_questions,
-                "transforms_embedding_model": embeddings,
-                "raise_exceptions": False,
-            }
-            
-            testset = generator.generate_with_langchain_docs(**kwargs)
+            # 关键：如果有了手动构建的知识图谱，将其挂载到生成器实例上
+            if use_kg and knowledge_graph:
+                print("  ℹ️  正在将手动构建的图谱挂载到生成器...")
+                generator.knowledge_graph = knowledge_graph
+                
+                # --- 补丁：手动注入 Persona (角色)，跳过有 Bug 的自动提取环节 ---
+                from ragas.testset.persona import Persona
+                print("  ℹ️  正在注入自定义 Persona (角色) 以跳过自动提取逻辑...")
+                generator.persona_list = [
+                    Persona(
+                        name="家庭厨师",
+                        role_description="一个希望为家人准备健康美味午餐的普通家庭主妇，关注做法步骤和食材替换。",
+                    ),
+                    Persona(
+                        name="美食评论家",
+                        role_description="一个对口味要求严苛、关注食材搭配和营养均衡的专业人士，喜欢对比不同菜谱的优劣。",
+                    )
+                ]
+                # -----------------------------------------------------------
+                
+                print("  ℹ️  开始基于知识图谱生成测试集 (限制并发以提高稳定性)...")
+                from ragas.run_config import RunConfig
+                testset = generator.generate(
+                    testset_size=total_questions,
+                    run_config=RunConfig(max_workers=3, timeout=120) # 关键：降低并发
+                )
+            else:
+                kwargs = {
+                    "documents": langchain_docs,
+                    "testset_size": total_questions,
+                    "transforms_embedding_model": embeddings,
+                    "raise_exceptions": False,
+                }
+                testset = generator.generate_with_langchain_docs(**kwargs)
+        except TypeError as e:
+            # 捕获 'float' object is not iterable 错误（query_distribution 的 bug）
+            if "'float' object is not iterable" in str(e) or "float" in str(e).lower():
+                print(f"\n⚠️  捕获到 RAGAS 内部类型错误: {e}")
+                print("   原因分析: 这通常是 query_distribution 分配比例导致的迭代器错误。")
+                print("   回退操作: 正在尝试【减少文档数量】进行重试...")
+                
+                # 尝试使用更少的文档
+                if len(langchain_docs) > 10:
+                    print(f"   重试策略: 只使用前 10 个文档，尝试生成 {min(10 * num_questions_per_doc, total_questions)} 个问题")
+                    try:
+                        kwargs["documents"] = langchain_docs[:10]
+                        kwargs["testset_size"] = min(10 * num_questions_per_doc, total_questions)
+                        testset = generator.generate_with_langchain_docs(**kwargs)
+                        print("✅ 重试成功: 测试集已在精简模式下生成。")
+                    except Exception as e2:
+                        print(f"❌ 再次失败: {e2}")
+                        return False
+                else:
+                    print("❌ 错误: 文档数已达最小值，无法进一步回退。")
+                    return False
+            else:
+                print(f"❌ 生成测试集失败 (TypeError): {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        except ValueError as e:
+            # 捕获聚类错误
+            error_msg = str(e)
+            if "Cannot form clusters" in error_msg or "No relationships match" in error_msg:
+                print(f"\n⚠️  捕获到 RAGAS 聚类失败: {error_msg}")
+                print("   原因分析: 文档数量不足或语义相关性太弱，无法构建聚类。")
+                print("   回退操作: 正在尝试【缩减问题数量】以跳过聚类重试...")
+                
+                # 尝试使用更小的 testset_size
+                smaller_testset_size = max(1, total_questions // 2)
+                if smaller_testset_size < total_questions:
+                    print(f"   重试策略: testset_size 缩减为 {smaller_testset_size} (原: {total_questions})")
+                    try:
+                        kwargs["testset_size"] = smaller_testset_size
+                        testset = generator.generate_with_langchain_docs(**kwargs)
+                        print("✅ 重试成功: 已降级生成。")
+                    except Exception as e2:
+                        print(f"❌ 缩减重试后仍然失败: {e2}")
+                        return False
+                else:
+                    return False
+            else:
+                print(f"❌ 生成测试集失败 (ValueError): {e}")
+                import traceback
+                traceback.print_exc()
+                return False
         except Exception as e:
             print(f"❌ 生成测试集失败: {e}")
             import traceback
@@ -961,6 +1100,45 @@ def generate_ragas_dataset_with_testset_generator(
                         print(f"❌ 重试后仍然失败: {e2}")
                         return False
                 else:
+                    return False
+            elif "headlines" in error_msg.lower() or "'headlines' property not found" in error_msg:
+                # HeadlinesExtractor/HeadlineSplitter 错误
+                print(f"⚠️  HeadlinesExtractor 错误: {error_msg}")
+                print()
+                print("可能的原因:")
+                print("  1. 部分文档没有成功提取到标题（headlines）")
+                print("  2. 文档格式不符合 HeadlinesExtractor 的预期")
+                print("  3. RAGAS 内部 transforms 处理时出现了不一致")
+                print()
+                print("解决方案:")
+                print("  1. 尝试减少文档数量，使用更少、更格式化的文档")
+                print("  2. 检查文档是否都有清晰的标题（Markdown 的 # 标题）")
+                print("  3. 或者尝试使用知识图谱方法（--use-kg）")
+                print()
+                print("尝试使用更少的文档数量重试...")
+                
+                # 尝试使用更少的文档
+                if len(langchain_docs) > 10:
+                    print(f"   重试: max_docs = 10 (原: {max_docs})")
+                    try:
+                        # 重新读取文档，只使用前 10 个
+                        md_files_retry = md_files[:10]
+                        langchain_docs_retry = convert_documents_to_langchain_docs(md_files_retry)
+                        kwargs["documents"] = langchain_docs_retry
+                        kwargs["testset_size"] = min(10 * num_questions_per_doc, total_questions)
+                        testset = generator.generate_with_langchain_docs(**kwargs)
+                        print("✅ 使用更少的文档后生成成功")
+                    except Exception as e2:
+                        print(f"❌ 重试后仍然失败: {e2}")
+                        print("   建议: 尝试使用知识图谱方法（--use-kg），或联系 RAGAS 开发者")
+                        import traceback
+                        traceback.print_exc()
+                        return False
+                else:
+                    print("   文档数量已经很少，无法进一步减少")
+                    print("   建议: 尝试使用知识图谱方法（--use-kg），或联系 RAGAS 开发者")
+                    import traceback
+                    traceback.print_exc()
                     return False
             else:
                 # 其他 ValueError
