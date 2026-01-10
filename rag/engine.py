@@ -76,7 +76,6 @@ class RAGEngine:
         self,
         file_path: str | Path,
         doc_id: Optional[str] = None,
-        verbose: bool = True,
     ) -> Dict[str, Any]:
         """
         处理文档：解析 → 分块 → 向量化 → 存储（参考 C8 的实现）。
@@ -84,7 +83,6 @@ class RAGEngine:
         Args:
             file_path: 文档文件路径
             doc_id: 文档 ID（如果不提供，则自动生成）
-            verbose: 是否显示详细进度
         
         Returns:
             处理结果：
@@ -94,44 +92,19 @@ class RAGEngine:
                 "status": "success"
             }
         """
-        import time
-        
         file_path = Path(file_path)
         
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
         
-        if verbose:
-            print(f"  📄 文件: {file_path.name} ({file_path.stat().st_size} 字节)")
-        
         # 1. 加载文档（会自动解析和分块，如果是 Markdown 且启用标题分割）
-        if verbose:
-            print(f"  ⏳ 步骤 1/6: 加载和解析文档...")
-        start_time = time.time()
-        
         self.data_module.load_documents([file_path], enhance_metadata=True)
         
-        load_time = time.time() - start_time
-        if verbose:
-            print(f"  ✅ 步骤 1 完成，耗时: {load_time:.2f} 秒")
-        
         # 2. 如果还没有分块，进行分块
-        if verbose:
-            print(f"  ⏳ 步骤 2/6: 文档分块...")
-        start_time = time.time()
-        
         if not self.data_module.chunks:
             self.data_module.chunk_documents()
         
-        chunk_time = time.time() - start_time
-        if verbose:
-            print(f"  ✅ 步骤 2 完成，耗时: {chunk_time:.2f} 秒")
-        
         # 3. 获取该文档的块（通过 parent_id 匹配）
-        if verbose:
-            print(f"  ⏳ 步骤 3/6: 提取文档块...")
-        start_time = time.time()
-        
         # 找到刚加载的文档
         parent_doc = None
         for doc in self.data_module.documents:
@@ -151,65 +124,20 @@ class RAGEngine:
         if not doc_chunks:
             raise ValueError(f"文档分块失败: {file_path}")
         
-        extract_time = time.time() - start_time
-        if verbose:
-            print(f"  ✅ 步骤 3 完成，找到 {len(doc_chunks)} 个块，耗时: {extract_time:.2f} 秒")
-        
         # 4. 提取文本和元数据
-        if verbose:
-            print(f"  ⏳ 步骤 4/6: 准备向量化数据...")
-        start_time = time.time()
-        
         texts = [chunk.page_content for chunk in doc_chunks]
         metadatas = [chunk.metadata for chunk in doc_chunks]
         
-        prep_time = time.time() - start_time
-        if verbose:
-            total_text_len = sum(len(t) for t in texts)
-            print(f"  ✅ 步骤 4 完成，总文本长度: {total_text_len} 字符，耗时: {prep_time:.2f} 秒")
-        
-        # 5. 向量化（最可能卡住的地方）
-        if verbose:
-            print(f"  ⏳ 步骤 5/6: 调用向量化 API（{len(texts)} 个文本块）...")
-            print(f"     这可能需要几秒到几十秒，取决于网络和 API 响应速度...")
-        start_time = time.time()
-        
-        try:
-            vectors = self.embedding_client.embed_texts(texts, verbose=verbose)
-            embed_time = time.time() - start_time
-            if verbose:
-                print(f"  ✅ 步骤 5 完成，生成 {len(vectors)} 个向量，耗时: {embed_time:.2f} 秒")
-        except Exception as e:
-            embed_time = time.time() - start_time
-            if verbose:
-                print(f"  ❌ 步骤 5 失败，耗时: {embed_time:.2f} 秒")
-                print(f"     错误详情: {type(e).__name__}: {e}")
-            raise RuntimeError(f"向量化失败: {e}") from e
+        # 5. 向量化
+        vectors = self.embedding_client.embed_texts(texts)
         
         # 6. 存储到向量数据库
-        if verbose:
-            print(f"  ⏳ 步骤 6/6: 写入向量数据库（Milvus）...")
-        start_time = time.time()
-        
-        try:
-            chunk_ids = self.vector_store.add_texts(
-                kb_id=self.kb_id,
-                texts=texts,
-                vectors=vectors,
-                metadatas=metadatas,
-            )
-            store_time = time.time() - start_time
-            if verbose:
-                print(f"  ✅ 步骤 6 完成，写入 {len(chunk_ids)} 个向量，耗时: {store_time:.2f} 秒")
-        except Exception as e:
-            store_time = time.time() - start_time
-            if verbose:
-                print(f"  ❌ 步骤 6 失败，耗时: {store_time:.2f} 秒")
-            raise RuntimeError(f"向量数据库写入失败: {e}") from e
-        
-        total_time = load_time + chunk_time + extract_time + prep_time + embed_time + store_time
-        if verbose:
-            print(f"  📊 总耗时: {total_time:.2f} 秒")
+        chunk_ids = self.vector_store.add_texts(
+            kb_id=self.kb_id,
+            texts=texts,
+            vectors=vectors,
+            metadatas=metadatas,
+        )
         
         return {
             "doc_id": parent_id,
