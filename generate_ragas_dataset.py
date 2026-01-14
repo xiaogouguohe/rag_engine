@@ -90,11 +90,7 @@ except ImportError as e:
 
 def find_markdown_files(directory: Path) -> List[Path]:
     """递归查找所有 .md 文件"""
-    md_files = []
-    for file_path in directory.rglob("*.md"):
-        if file_path.is_file():
-            md_files.append(file_path)
-    return sorted(md_files)
+    return DataPreparationModule.find_files(directory, "*.md")
 
 
 def generate_questions_from_document(

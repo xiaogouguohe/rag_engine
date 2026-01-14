@@ -53,6 +53,29 @@ class DataPreparationModule:
         self.documents: List[Document] = []  # 父文档列表
         self.chunks: List[Document] = []     # 子文档列表
         self.parent_child_map: Dict[str, str] = {}  # 子块ID -> 父文档ID的映射
+
+    @staticmethod
+    def find_files(directory: str | Path, pattern: str = "*.md") -> List[Path]:
+        """
+        递归查找目录中匹配模式的文件。
+        
+        Args:
+            directory: 目录路径
+            pattern: 文件匹配模式（默认：*.md）
+        
+        Returns:
+            文件路径列表
+        """
+        directory = Path(directory)
+        if not directory.exists() or not directory.is_dir():
+            return []
+        
+        files = []
+        for file_path in directory.rglob(pattern):
+            if file_path.is_file():
+                files.append(file_path)
+        
+        return sorted(files)
     
     def load_documents(
         self,

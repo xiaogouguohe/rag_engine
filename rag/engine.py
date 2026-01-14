@@ -78,34 +78,25 @@ class RAGEngine:
         doc_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        处理文档：解析 → 分块 → 向量化 → 存储（参考 C8 的实现）。
-        
-        Args:
-            file_path: 文档文件路径
-            doc_id: 文档 ID（如果不提供，则自动生成）
-        
-        Returns:
-            处理结果：
-            {
-                "doc_id": str,
-                "chunks_count": int,
-                "status": "success"
-            }
+        处理单篇文档：解析 → 分块 → 向量化 → 存储。
         """
         file_path = Path(file_path)
         
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
         
-        # 1. 加载文档（会自动解析和分块，如果是 Markdown 且启用标题分割）
+        # 1. 清理之前的状态，确保只处理当前文档
+        self.data_module.documents = []
+        self.data_module.chunks = []
+        
+        # 2. 加载文档
         self.data_module.load_documents([file_path], enhance_metadata=True)
         
-        # 2. 如果还没有分块，进行分块
+        # 3. 进行分块
         if not self.data_module.chunks:
             self.data_module.chunk_documents()
         
-        # 3. 获取该文档的块（通过 parent_id 匹配）
-        # 找到刚加载的文档
+        # 4. 获取该文档的块
         parent_doc = None
         for doc in self.data_module.documents:
             if str(file_path) in doc.metadata.get("source", ""):
@@ -124,14 +115,14 @@ class RAGEngine:
         if not doc_chunks:
             raise ValueError(f"文档分块失败: {file_path}")
         
-        # 4. 提取文本和元数据
+        # 5. 提取文本和元数据
         texts = [chunk.page_content for chunk in doc_chunks]
         metadatas = [chunk.metadata for chunk in doc_chunks]
         
-        # 5. 向量化
+        # 6. 向量化
         vectors = self.embedding_client.embed_texts(texts)
         
-        # 6. 存储到向量数据库
+        # 7. 存储到向量数据库
         chunk_ids = self.vector_store.add_texts(
             kb_id=self.kb_id,
             texts=texts,
@@ -144,6 +135,71 @@ class RAGEngine:
             "chunks_count": len(doc_chunks),
             "chunk_ids": chunk_ids,
             "status": "success",
+        }
+
+    def ingest_directory(
+        self,
+        dir_path: str | Path,
+        pattern: str = "*.md",
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        批量处理目录下的文档。
+        
+        Args:
+            dir_path: 目录路径
+            pattern: 文件匹配模式
+            verbose: 是否打印进度
+            
+        Returns:
+            处理统计结果
+        """
+        dir_path = Path(dir_path)
+        if not dir_path.exists() or not dir_path.is_dir():
+            raise FileNotFoundError(f"目录不存在或不是目录: {dir_path}")
+
+        files = sorted(list(dir_path.rglob(pattern)))
+        if not files:
+            return {
+                "total_files": 0,
+                "success_count": 0,
+                "fail_count": 0,
+                "total_chunks": 0,
+            }
+
+        if verbose:
+            print(f"开始加载目录: {dir_path} (找到 {len(files)} 个文件)")
+            print("-" * 40)
+
+        success_count = 0
+        fail_count = 0
+        total_chunks = 0
+
+        for i, file_path in enumerate(files, 1):
+            if verbose:
+                try:
+                    rel_path = file_path.relative_to(dir_path)
+                except ValueError:
+                    rel_path = file_path.name
+                print(f"[{i}/{len(files)}] 处理: {rel_path}", end=" ... ", flush=True)
+            
+            try:
+                result = self.ingest_document(file_path)
+                success_count += 1
+                total_chunks += result["chunks_count"]
+                if verbose:
+                    print(f"✅ ({result['chunks_count']} 块)")
+            except Exception as e:
+                fail_count += 1
+                if verbose:
+                    print(f"❌ 失败: {e}")
+
+        return {
+            "total_files": len(files),
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "total_chunks": total_chunks,
+            "status": "completed"
         }
     
     def query(
@@ -251,4 +307,3 @@ class RAGEngine:
 
 
 __all__ = ["RAGEngine"]
-

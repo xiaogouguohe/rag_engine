@@ -343,8 +343,8 @@ python3 main.py
 **方式三：命令行指定路径**
 
 ```bash
-# 使用启动脚本加载指定目录
-python3 load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
+# 执行向量化并保存到数据库（支持单文件或整个目录）
+python3 main.py ingest --kb-id recipes_kb --dir ../HowToCook/dishes
 ```
 
 ## RAG 系统评估标准
