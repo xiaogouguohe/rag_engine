@@ -141,6 +141,7 @@ class DataPreparationModule:
                 metadata = {
                     "source": str(file_path),
                     "parent_id": parent_id,
+                    "doc_id": parent_id, # 确保 doc_id 和 parent_id 都有，增强兼容性
                     "doc_type": "parent",
                     "file_name": result["file_name"],
                     "file_type": result["file_type"],

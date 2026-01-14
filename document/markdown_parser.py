@@ -143,6 +143,7 @@ class MarkdownParser(BaseParser):
         parent_metadata = {
             "source": str(file_path),
             "parent_id": parent_id,
+            "doc_id": parent_id, # 补全 doc_id 字段
             "doc_type": "parent",
             "file_name": file_path.name,
             "file_type": "markdown",

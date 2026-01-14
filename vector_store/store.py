@@ -33,7 +33,7 @@ except ImportError:
 class ChunkMetadata:
     """Chunk 元数据（参考 RAGFlow 的 chunk 结构）"""
     chunk_id: str
-    doc_id: str
+    parent_id: str
     kb_id: str
     text: str
     # 可选字段
@@ -86,45 +86,49 @@ class VectorStore:
         return self._collections[kb_id]
     
     def _ensure_collection(self, kb_id: str, vector_dim: int, use_sparse: bool = False):
-        """确保 collection 存在，支持多向量字段"""
+        """确保 collection 存在，支持多向量字段和标量索引"""
         collection_name = self._get_collection_name(kb_id)
         
         if self.client.has_collection(collection_name):
-            # 检查现有 collection 是否包含 sparse 字段
+            # 检查现有 collection 是否包含关键字段
             stats = self.client.describe_collection(collection_name)
-            has_sparse = False
-            if isinstance(stats, dict) and "fields" in stats:
-                has_sparse = any(f.get("name") == "sparse_vector" for f in stats["fields"])
+            fields = [f.get("name") for f in stats.get("fields", [])]
             
-            # 如果配置要求使用稀疏向量，但现有集合没有，则需要重建
-            if use_sparse and not has_sparse:
-                print(f"     ⚠️  知识库 {kb_id} 架构不匹配 (缺少稀疏向量字段)，正在重建...")
+            # 检查架构是否符合预期
+            has_sparse = "sparse_vector" in fields
+            has_parent_id = "parent_id" in fields
+            
+            # 如果配置要求使用稀疏向量，但现有集合没有，或者缺少 parent_id 字段，则需要重建
+            if (use_sparse and not has_sparse) or (not has_parent_id):
+                print(f"     ⚠️  知识库 {kb_id} 架构已更新，正在重建集合...")
                 self.client.drop_collection(collection_name)
             else:
                 return collection_name
         
         # 使用详细的 Schema 创建支持多向量的 collection
         from pymilvus import DataType
-        schema = self.client.create_schema(auto_id=True, enable_dynamic_field=True)
+        # 核心改动：auto_id=False，使用自定义的确定性 ID
+        schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
         
-        # 主键
-        schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
-        # 密集向量
+        # 1. 基础字段
+        # 主键改为 VARCHAR，存储 hash(parent_id + position)
+        schema.add_field(field_name="id", datatype=DataType.VARCHAR, max_length=64, is_primary=True)
+        # 独立标量字段：父文档 ID 和 知识库 ID
+        schema.add_field(field_name="parent_id", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="kb_id", datatype=DataType.VARCHAR, max_length=64)
+        
+        # 2. 向量字段
         schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=vector_dim)
-        # 原始文本
-        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535)
-        # 元数据 JSON
-        schema.add_field(field_name="metadata", datatype=DataType.VARCHAR, max_length=65535)
-        
-        # 如果启用稀疏向量
         if use_sparse:
-            # Milvus Lite 2.4+ 支持 SPARSE_FLOAT_VECTOR
             try:
                 schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
-            except Exception as e:
-                print(f"     ⚠️  当前 Milvus Lite 版本不支持原生稀疏向量，将跳过: {e}")
+            except Exception:
                 use_sparse = False
 
+        # 3. 文本和元数据
+        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535)
+        schema.add_field(field_name="metadata", datatype=DataType.VARCHAR, max_length=65535)
+        
         self.client.create_collection(
             collection_name=collection_name,
             schema=schema,
@@ -132,8 +136,9 @@ class VectorStore:
             index_params=None # Milvus Lite 会自动创建索引
         )
         
-        # 密集向量索引
+        # 建立索引
         index_params = self.client.prepare_index_params()
+        # 密集向量索引
         index_params.add_index(field_name="vector", metric_type="COSINE")
         if use_sparse:
             # Milvus Lite 本地模式对稀疏向量不支持 AUTOINDEX
@@ -143,6 +148,10 @@ class VectorStore:
                 metric_type="IP", 
                 index_type="SPARSE_INVERTED_INDEX"
             )
+        
+        # 核心改动：为标量字段建立索引，加速过滤查询
+        index_params.add_index(field_name="parent_id")
+        index_params.add_index(field_name="kb_id")
         
         self.client.create_index(collection_name, index_params)
         
@@ -158,11 +167,12 @@ class VectorStore:
         colbert_vectors: Optional[List[Any]] = None,
     ) -> List[str]:
         """
-        添加文本和多种向量到指定知识库。
+        添加文本和多种向量到指定知识库。支持确定性 ID。
         """
         if not texts or not vectors:
             return []
         
+        import hashlib
         vector_dim = len(vectors[0])
         use_sparse = sparse_vectors is not None
         
@@ -170,23 +180,30 @@ class VectorStore:
         collection_name = self._ensure_collection(kb_id, vector_dim, use_sparse=use_sparse)
         
         data = []
-        chunk_ids = []
+        ids = []
         
         for i, (text, vector) in enumerate(zip(texts, vectors)):
-            chunk_id = f"{kb_id}_chunk_{i}_{int(time.time())}"
-            chunk_ids.append(chunk_id)
-            
             metadata = metadatas[i] if metadatas and i < len(metadatas) else {}
+            
+            # 严谨命名：parent_id 代表原始文档
+            parent_id = metadata.get("parent_id") or metadata.get("doc_id") or ""
+            position = metadata.get("position") or metadata.get("chunk_index") or 0
+            
+            # 生成确定性 ID: hash(parent_id + position)
+            id_str = f"{parent_id}_{position}"
+            deterministic_id = hashlib.md5(id_str.encode()).hexdigest()
+            ids.append(deterministic_id)
+            
+            # 构建元数据 JSON（排除已提拔为独立字段的信息）
             metadata_dict = {
-                "chunk_id": chunk_id,
-                "doc_id": metadata.get("doc_id", ""),
-                "kb_id": kb_id,
-                "page_num": metadata.get("page_num"),
-                "position": metadata.get("position"),
-                **metadata.get("metadata", {}),
+                "chunk_id": metadata.get("chunk_id", deterministic_id),
+                **{k: v for k, v in metadata.items() if k not in ["doc_id", "parent_id", "position", "chunk_index", "page_num", "kb_id", "chunk_id"]},
             }
             
             item = {
+                "id": deterministic_id,      # 主键
+                "parent_id": parent_id,      # 独立标量字段
+                "kb_id": kb_id,              # 独立标量字段
                 "vector": vector,
                 "text": text,
                 "metadata": json.dumps(metadata_dict, ensure_ascii=False),
@@ -198,11 +215,12 @@ class VectorStore:
             data.append(item)
         
         try:
-            self.client.insert(collection_name=collection_name, data=data)
+            # 使用 upsert 模式，如果 ID 已存在则更新，不存在则插入
+            self.client.upsert(collection_name=collection_name, data=data)
         except Exception as e:
-            raise RuntimeError(f"插入数据失败: {str(e)}")
+            raise RuntimeError(f"写入数据失败: {str(e)}")
         
-        return chunk_ids
+        return ids
     
     def search(
         self,
@@ -226,7 +244,7 @@ class VectorStore:
                     collection_name=collection_name,
                     data=[query_vector],
                     limit=top_k,
-                    output_fields=["text", "metadata"],
+                    output_fields=["text", "metadata", "parent_id", "kb_id"],
                 )
             else:
                 # 2. 混合搜索 (Hybrid Search)
@@ -254,7 +272,7 @@ class VectorStore:
                     reqs=[dense_req, sparse_req],
                     ranker=RRFRanker(), # 默认 RRF 排名
                     limit=top_k,
-                    output_fields=["text", "metadata"]
+                    output_fields=["text", "metadata", "parent_id", "kb_id"]
                 )
         except Exception as e:
             # 如果 hybrid_search 报错（可能是某些环境不支持），降级到密集向量搜索
@@ -263,22 +281,23 @@ class VectorStore:
                 collection_name=collection_name,
                 data=[query_vector],
                 limit=top_k,
-                output_fields=["text", "metadata"],
+                output_fields=["text", "metadata", "parent_id", "kb_id"],
             )
         
-        # 处理结果（参考 cloud-edge-milk-tea-agent 的格式）
+        # 处理结果
         search_results = []
         
         if results and len(results) > 0:
             for hit in results[0]:
-                # Milvus 返回的距离（对于余弦相似度，距离 = 1 - 相似度）
-                # 所以相似度 = 1 - 距离（参考 cloud-edge-milk-tea-agent）
                 distance = hit.get("distance", 0)
                 similarity_score = 1.0 - distance if distance <= 1 else 1.0 / (1.0 + distance)
                 
-                # 提取文本和元数据
-                text = hit.get("text", hit.get("entity", {}).get("text", ""))
-                metadata_str = hit.get("metadata", hit.get("entity", {}).get("metadata", "{}"))
+                # 提取字段（优先从 entity 获取，Milvus Lite 2.4+ 的返回结构）
+                entity = hit.get("entity", {})
+                text = hit.get("text", entity.get("text", ""))
+                metadata_str = hit.get("metadata", entity.get("metadata", "{}"))
+                parent_id = hit.get("parent_id", entity.get("parent_id", ""))
+                hit_kb_id = hit.get("kb_id", entity.get("kb_id", kb_id))
                 
                 # 解析元数据
                 try:
@@ -286,22 +305,22 @@ class VectorStore:
                 except Exception:
                     metadata_dict = {}
                 
-                # 应用过滤条件（简单实现，后续可以扩展）
+                # 应用过滤条件（标量过滤）
                 if filter_condition:
-                    if "doc_id" in filter_condition:
-                        if metadata_dict.get("doc_id") != filter_condition["doc_id"]:
+                    if "parent_id" in filter_condition:
+                        if parent_id != filter_condition["parent_id"]:
                             continue
                 
                 # 构建 ChunkMetadata
                 chunk_metadata = ChunkMetadata(
                     chunk_id=metadata_dict.get("chunk_id", ""),
-                    doc_id=metadata_dict.get("doc_id", ""),
-                    kb_id=metadata_dict.get("kb_id", kb_id),
+                    parent_id=parent_id,
+                    kb_id=hit_kb_id,
                     text=text,
                     page_num=metadata_dict.get("page_num"),
                     position=metadata_dict.get("position"),
                     metadata={k: v for k, v in metadata_dict.items() 
-                             if k not in ["chunk_id", "doc_id", "kb_id", "page_num", "position"]},
+                             if k not in ["chunk_id", "parent_id", "kb_id", "page_num", "position"]},
                 )
                 
                 search_results.append((similarity_score, chunk_metadata))
@@ -352,13 +371,15 @@ class VectorStore:
                 collection_name=collection_name,
                 filter="",  # 不过滤，获取所有
                 limit=query_limit,
-                output_fields=["text", "metadata"],
+                output_fields=["text", "metadata", "parent_id", "kb_id"],
             )
             
             chunks = []
             for result in results:
                 text = result.get("text", "")
                 metadata_str = result.get("metadata", "{}")
+                parent_id = result.get("parent_id", "")
+                hit_kb_id = result.get("kb_id", kb_id)
                 
                 # 解析元数据
                 try:
@@ -368,13 +389,13 @@ class VectorStore:
                 
                 chunk_metadata = ChunkMetadata(
                     chunk_id=metadata_dict.get("chunk_id", ""),
-                    doc_id=metadata_dict.get("doc_id", ""),
-                    kb_id=metadata_dict.get("kb_id", kb_id),
+                    parent_id=parent_id,
+                    kb_id=hit_kb_id,
                     text=text,
                     page_num=metadata_dict.get("page_num"),
                     position=metadata_dict.get("position"),
                     metadata={k: v for k, v in metadata_dict.items() 
-                             if k not in ["chunk_id", "doc_id", "kb_id", "page_num", "position"]},
+                             if k not in ["chunk_id", "parent_id", "kb_id", "page_num", "position"]},
                 )
                 chunks.append(chunk_metadata)
             
@@ -417,7 +438,7 @@ class VectorStore:
     
     def get_document_list(self, kb_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        获取知识库中的文档列表（按 doc_id 分组）。
+        获取知识库中的文档列表（按 parent_id 分组）。
         
         Args:
             kb_id: 知识库 ID
@@ -426,7 +447,7 @@ class VectorStore:
         Returns:
             文档信息列表，每个元素包含：
             {
-                "doc_id": str,
+                "parent_id": str,
                 "chunks_count": int,
                 "first_chunk_preview": str,  # 第一个 chunk 的前 100 字符
             }
@@ -436,16 +457,16 @@ class VectorStore:
         from collections import defaultdict
         docs_by_id = defaultdict(list)
         for chunk in chunks:
-            docs_by_id[chunk.doc_id].append(chunk)
+            docs_by_id[chunk.parent_id].append(chunk)
         
         doc_list = []
-        for doc_id, chunks_list in list(docs_by_id.items())[:limit]:
+        for parent_id, chunks_list in list(docs_by_id.items())[:limit]:
             # 按 position 排序
             chunks_sorted = sorted(chunks_list, key=lambda c: c.position if c.position is not None else 0)
             first_chunk_text = chunks_sorted[0].text if chunks_sorted else ""
             
             doc_list.append({
-                "doc_id": doc_id,
+                "parent_id": parent_id,
                 "chunks_count": len(chunks_list),
                 "first_chunk_preview": first_chunk_text[:100] + "..." if len(first_chunk_text) > 100 else first_chunk_text,
             })

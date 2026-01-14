@@ -31,13 +31,17 @@ for coll in collections:
         row = res[0]
         print("该行包含的字段及其样例如下:")
         print("-" * 50)
-        for key in row.keys():
+        # 按照逻辑顺序排序显示
+        display_order = ["id", "parent_id", "kb_id", "text", "vector", "sparse_vector", "metadata"]
+        keys = sorted(row.keys(), key=lambda x: display_order.index(x) if x in display_order else 99)
+        
+        for key in keys:
             value = row[key]
             # 针对不同类型的字段进行美化展示
             if isinstance(value, list) and len(value) > 10:
-                print(f"  🔹 {key:15}: [向量/列表] 长度: {len(value)}")
-            elif isinstance(value, dict) and len(value) > 5:
-                print(f"  🔹 {key:15}: [稀疏向量/字典] 包含 {len(value)} 个键值对")
+                print(f"  🔹 {key:15}: [密集向量] 长度: {len(value)}")
+            elif isinstance(value, dict):
+                print(f"  🔹 {key:15}: [稀疏向量] 包含 {len(value)} 个键值对")
             else:
                 # 对 metadata 字符串做一下 JSON 格式化展示
                 if key == "metadata" and isinstance(value, str):
@@ -52,4 +56,3 @@ for coll in collections:
         print("该集合为空。")
 
 client.close()
-
