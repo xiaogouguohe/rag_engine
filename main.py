@@ -35,6 +35,7 @@ def load_config_from_json(config_path: str) -> List[KnowledgeBaseConfig]:
             kb_id=kb["kb_id"],
             source_path=kb["source_path"],
             file_pattern=kb.get("file_pattern", "*.md"),
+            top_k=kb.get("top_k", 4),
             use_markdown_header_split=kb.get("use_markdown_header_split", True),
         ))
     
@@ -75,9 +76,28 @@ def handle_load(args):
     return 0
 
 
+def get_kb_config(kb_id: str, config_path: str = "rag_config.json") -> Optional[KnowledgeBaseConfig]:
+    """获取指定 ID 的知识库配置"""
+    try:
+        kb_configs = load_config_from_json(config_path)
+        for kb in kb_configs:
+            if kb.kb_id == kb_id:
+                return kb
+    except Exception:
+        pass
+    return None
+
+
 def handle_chat(args):
     """交互对话模式逻辑"""
-    print(f"\n💬 进入交互对话模式 (知识库: {args.kb_id})")
+    kb_config = get_kb_config(args.kb_id)
+    
+    # 确定最终使用的 top_k: 命令行指定优先，否则用配置文件，最后默认 4
+    top_k = args.top_k
+    if top_k == 4 and kb_config and kb_config.top_k != 4:
+        top_k = kb_config.top_k
+
+    print(f"\n💬 进入交互对话模式 (知识库: {args.kb_id}, Top-K: {top_k})")
     print("输入 'exit', 'quit' 或 'q' 退出。输入 'clear' 清屏。")
     print("-" * 50)
     
@@ -97,7 +117,7 @@ def handle_chat(args):
                 continue
                 
             print("🤖 AI 正在思考...", end="", flush=True)
-            result = engine.query(question, top_k=args.top_k)
+            result = engine.query(question, top_k=top_k)
             print("\r" + " " * 30 + "\r", end="") # 清除“思考中”提示
             
             print(f"🤖 AI: {result['answer']}")
@@ -117,10 +137,15 @@ def handle_chat(args):
 
 def handle_query(args):
     """单次查询逻辑"""
+    kb_config = get_kb_config(args.kb_id)
+    top_k = args.top_k
+    if top_k == 4 and kb_config and kb_config.top_k != 4:
+        top_k = kb_config.top_k
+
     engine = RAGEngine(kb_id=args.kb_id)
-    result = engine.query(args.question, top_k=args.top_k)
+    result = engine.query(args.question, top_k=top_k)
     
-    print(f"\n🤖 AI 回答: {result.get('answer', '')}")
+    print(f"\n🤖 AI 回答 (Top-K: {top_k}):\n{result.get('answer', '')}")
     return 0
 
 

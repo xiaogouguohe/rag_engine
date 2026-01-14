@@ -71,6 +71,17 @@ class RAGEngine:
         self.embedding_client = EmbeddingClient.from_config(config)
         self.llm_client = LLMClient.from_config(config)
         self.vector_store = VectorStore(storage_path=config.storage_path)
+        
+        # 记录该知识库的特定配置
+        self.kb_config = None
+        if self.config.knowledge_bases:
+            for kb in self.config.knowledge_bases:
+                if kb.kb_id == kb_id:
+                    self.kb_config = kb
+                    break
+        
+        # 设置默认检索数量
+        self.default_top_k = self.kb_config.top_k if self.kb_config else 4
     
     def ingest_document(
         self,
@@ -205,7 +216,7 @@ class RAGEngine:
     def query(
         self,
         question: str,
-        top_k: int = 5,
+        top_k: Optional[int] = None,
         similarity_threshold: float = 0.0,
         system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -214,7 +225,7 @@ class RAGEngine:
         
         Args:
             question: 用户问题
-            top_k: 检索 top-k 个相关块
+            top_k: 检索 top-k 个相关块（如果为 None 则使用配置中的默认值）
             similarity_threshold: 相似度阈值（低于此值的块将被过滤）
             system_prompt: 系统提示词（可选）
         
@@ -229,6 +240,9 @@ class RAGEngine:
         if not question.strip():
             raise ValueError("问题不能为空")
         
+        # 0. 确定最终使用的 top_k
+        final_top_k = top_k if top_k is not None else self.default_top_k
+        
         # 1. 问题向量化
         query_vectors = self.embedding_client.embed_texts([question])
         query_vector = query_vectors[0]
@@ -237,7 +251,7 @@ class RAGEngine:
         search_results = self.vector_store.search(
             kb_id=self.kb_id,
             query_vector=query_vector,
-            top_k=top_k,
+            top_k=final_top_k,
         )
         
         # 3. 过滤低相似度的结果
