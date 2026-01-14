@@ -55,6 +55,7 @@ class KnowledgeBaseConfig:
     top_k: int = 4  # 默认检索数量
     use_sparse: bool = False  # 是否启用稀疏向量检索
     use_multi_vector: bool = False  # 是否启用多向量检索 (ColBERT)
+    use_query_rewrite: bool = False  # 是否启用查询改写 (Query Rewriting)
     use_markdown_header_split: bool = True  # 是否使用 Markdown 标题分割
 
 
@@ -186,6 +187,7 @@ class AppConfig:
                         top_k=kb.get("top_k", 4),
                         use_sparse=kb.get("use_sparse", False),
                         use_multi_vector=kb.get("use_multi_vector", False),
+                        use_query_rewrite=kb.get("use_query_rewrite", False),
                         use_markdown_header_split=kb.get("use_markdown_header_split", True),
                     ))
                 if kb_configs:

@@ -156,7 +156,7 @@ class RAGEngine:
         )
         
         return {
-            "doc_id": parent_id,
+            "parent_id": parent_id, # 统一使用 parent_id
             "chunks_count": len(doc_chunks),
             "chunk_ids": chunk_ids,
             "status": "success",
@@ -227,15 +227,53 @@ class RAGEngine:
             "status": "completed"
         }
     
+    def _rewrite_query(self, question: str, history: List[Dict[str, str]]) -> str:
+        """
+        利用 LLM 进行查询改写，将多轮对话中的模糊问题转化为独立的搜索查询。
+        """
+        if not history:
+            return question
+
+        # 构造改写提示词
+        history_str = ""
+        for msg in history[-5:]: # 只取最近 5 轮，避免 context 过长
+            role = "用户" if msg["role"] == "user" else "助手"
+            history_str += f"{role}: {msg['content']}\n"
+
+        prompt = f"""你是一个搜索查询改写助手。你的任务是根据对话历史和当前问题，生成一个【独立且描述完整】的搜索查询。
+这个查询将被用于向量数据库检索，因此它应该包含所有必要的关键词，而不依赖于之前的对话语境。
+
+对话历史：
+{history_str}
+
+当前问题：{question}
+
+请直接输出改写后的搜索查询，不要包含任何解释或引导语。"""
+
+        try:
+            rewritten_query = self.llm_client.generate(
+                prompt=prompt,
+                system_prompt="你是一个精准的查询改写专家。",
+                temperature=0.0, # 必须使用 0，确保稳定性
+            ).strip()
+            
+            # 简单清洗
+            rewritten_query = rewritten_query.strip('"').strip("'")
+            return rewritten_query
+        except Exception as e:
+            print(f"     ⚠️ 查询改写失败: {e}，回退到原始问题。")
+            return question
+
     def query(
         self,
         question: str,
         top_k: Optional[int] = None,
         similarity_threshold: float = 0.0,
         system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
-        问答流程：支持密集、稀疏、多向量检索。
+        问答流程：支持密集、稀疏、多向量检索，以及可选的查询改写。
         """
         if not question.strip():
             raise ValueError("问题不能为空")
@@ -244,10 +282,19 @@ class RAGEngine:
         final_top_k = top_k if top_k is not None else self.default_top_k
         use_sparse = self.kb_config.use_sparse if self.kb_config else False
         use_multi = self.kb_config.use_multi_vector if self.kb_config else False
+        use_rewrite = self.kb_config.use_query_rewrite if self.kb_config else False
         
-        # 1. 问题向量化
+        # 1. 查询改写 (如果启用且有历史)
+        search_query = question
+        if use_rewrite and history:
+            print(f"     🔄 正在进行查询改写...")
+            search_query = self._rewrite_query(question, history)
+            if search_query != question:
+                print(f"     📝 改写后的查询: \"{search_query}\"")
+        
+        # 2. 问题向量化 (使用改写后的 search_query 进行检索)
         emb_results = self.embedding_client.embed_texts(
-            [question], 
+            [search_query], 
             return_sparse=use_sparse,
             return_multi=use_multi
         )
@@ -321,7 +368,7 @@ class RAGEngine:
             context_chunks.append({
                 "text": metadata.text,
                 "score": score,
-                "doc_id": metadata.doc_id,
+                "parent_id": metadata.parent_id, # 修正属性名
                 "chunk_id": metadata.chunk_id,
             })
         

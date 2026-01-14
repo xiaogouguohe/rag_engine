@@ -38,6 +38,7 @@ def load_config_from_json(config_path: str) -> List[KnowledgeBaseConfig]:
             top_k=kb.get("top_k", 4),
             use_sparse=kb.get("use_sparse", False),
             use_multi_vector=kb.get("use_multi_vector", False),
+            use_query_rewrite=kb.get("use_query_rewrite", False),
             use_markdown_header_split=kb.get("use_markdown_header_split", True),
         ))
     
@@ -105,6 +106,9 @@ def handle_chat(args):
     
     engine = RAGEngine(kb_id=args.kb_id)
     
+    # 维护对话历史
+    history = []
+    
     while True:
         try:
             question = input("\n👤 用户: ").strip()
@@ -116,13 +120,20 @@ def handle_chat(args):
                 break
             if question.lower() == "clear":
                 print("\033c", end="") # 清屏
+                history = [] # 清屏时也重置历史
                 continue
                 
             print("🤖 AI 正在思考...", end="", flush=True)
-            result = engine.query(question, top_k=top_k)
+            result = engine.query(question, top_k=top_k, history=history)
             print("\r" + " " * 30 + "\r", end="") # 清除“思考中”提示
             
             print(f"🤖 AI: {result['answer']}")
+            
+            # 更新历史
+            history.append({"role": "user", "content": question})
+            history.append({"role": "assistant", "content": result['answer']})
+            if len(history) > 10:
+                history = history[-10:]
             
             if args.show_sources:
                 print("\n   [参考来源]")

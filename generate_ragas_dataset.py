@@ -357,7 +357,7 @@ def generate_ragas_dataset_with_knowledge_graph(
             from collections import defaultdict
             docs_by_id = defaultdict(list)
             for chunk in all_chunks:
-                docs_by_id[chunk.doc_id].append(chunk)
+                docs_by_id[chunk.parent_id].append(chunk)
             
             # 转换为 langchain Document 格式
             langchain_docs = []
