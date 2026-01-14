@@ -36,12 +36,13 @@ class LLMConfig:
 
 @dataclass
 class EmbeddingConfig:
-    """Embedding 模型配置（同样默认 OpenAI 兼容接口）"""
+    """Embedding 模型配置"""
 
     api_key: str
     base_url: str = "https://api.openai.com/v1"
     model: str = "text-embedding-3-small"
     timeout: float = 60.0
+    mode: str = "api"  # "api" 或 "local"
 
 
 @dataclass
@@ -154,6 +155,7 @@ class AppConfig:
             base_url=_get("EMBEDDING_BASE_URL", llm_cfg.base_url),
             model=_get("EMBEDDING_MODEL", "text-embedding-3-small"),
             timeout=float(_get("EMBEDDING_TIMEOUT", "60")),
+            mode=_get("EMBEDDING_MODE", "api"), # "api" 或 "local"
         )
 
         storage_path = _get("STORAGE_PATH", "./data/indices")

@@ -406,10 +406,37 @@ class VectorStore:
             }
         
         try:
-            # 尝试获取 collection 信息
-            stats = self.client.describe_collection(collection_name)
-            num_entities = stats.get("num_entities", 0) if isinstance(stats, dict) else 0
-            vector_dim = stats.get("dimension", stats.get("fields", [{}])[0].get("params", {}).get("dim", None)) if isinstance(stats, dict) else None
+            # 在获取统计信息前，先显式 flush 确保数据落盘
+            try:
+                self.client.flush(collection_name)
+            except Exception:
+                pass
+            
+            # 1. 尝试通过查询获取精确数量（最可靠）
+            try:
+                res = self.client.query(
+                    collection_name=collection_name, 
+                    filter="", 
+                    output_fields=["count(*)"]
+                )
+                num_entities = res[0]["count(*)"] if res else 0
+            except Exception:
+                # 2. 如果查询失败，回落到 describe_collection
+                stats = self.client.describe_collection(collection_name)
+                num_entities = stats.get("num_entities", 0) if isinstance(stats, dict) else 0
+            
+            # 获取维度
+            try:
+                stats = self.client.describe_collection(collection_name)
+                # 兼容不同版本的返回格式
+                vector_dim = stats.get("dimension")
+                if vector_dim is None and "fields" in stats:
+                    for field in stats["fields"]:
+                        if field.get("name") == "vector":
+                            vector_dim = field.get("params", {}).get("dim")
+                            break
+            except Exception:
+                vector_dim = None
         except Exception:
             num_entities = 0
             vector_dim = None
