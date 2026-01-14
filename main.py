@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-RAG 引擎主入口
--------------
+RAG 引擎统一入口
+---------------
 
-统一管理知识库的加载、查询和统计。
+功能：
+1. load: 根据 JSON 配置文件向量化知识库（用完即退）
+2. chat: 进入交互对话模式（持久化进程）
+3. query: 单次问题查询
+4. stats: 查看知识库统计信息
 """
 
 import sys
@@ -37,58 +41,27 @@ def load_config_from_json(config_path: str) -> List[KnowledgeBaseConfig]:
     return kb_configs
 
 
-def handle_ingest(args):
-    """处理加载文档的逻辑"""
-    engine = RAGEngine(
-        kb_id=args.kb_id,
-        use_markdown_header_split=not args.no_markdown_split,
-    )
-    
-    if args.file:
-        print(f"正在加载单个文档: {args.file}")
-        result = engine.ingest_document(args.file)
-        print(f"✅ 成功 - 分块数: {result['chunks_count']}")
-    elif args.dir:
-        result = engine.ingest_directory(
-            dir_path=args.dir,
-            pattern=args.pattern,
-            verbose=True
-        )
-        print("\n" + "=" * 40)
-        print("批量加载完成")
-        print(f"  成功: {result['success_count']}")
-        print(f"  失败: {result['fail_count']}")
-        print(f"  总计: {result['total_files']}")
-        print(f"  总分块数: {result['total_chunks']}")
-    else:
-        print("❌ 请指定 --file 或 --dir 参数")
-        return 1
-    return 0
-
-
-def handle_load_all(args):
-    """根据配置文件加载所有知识库"""
+def handle_load(args):
+    """根据配置文件加载知识库（向量化逻辑）"""
     kb_configs = []
     config_file = Path(args.config)
     
     if config_file.exists():
         kb_configs = load_config_from_json(args.config)
-        print(f"✅ 从配置文件加载: {args.config}")
+        print(f"✅ 正在读取配置文件: {args.config}")
     else:
-        app_config = AppConfig.load()
-        if app_config.knowledge_bases:
-            kb_configs = app_config.knowledge_bases
-            print("✅ 从环境变量加载知识库配置")
-    
-    if not kb_configs:
-        print("❌ 未找到任何知识库配置")
+        print(f"❌ 配置文件不存在: {args.config}")
         return 1
     
+    # 如果指定了具体的 kb_id，则只处理那一个
     if args.kb_id:
         kb_configs = [kb for kb in kb_configs if kb.kb_id == args.kb_id]
+        if not kb_configs:
+            print(f"❌ 配置文件中未找到 kb_id: {args.kb_id}")
+            return 1
     
     for kb_config in kb_configs:
-        print(f"\n开始加载知识库: {kb_config.kb_id}")
+        print(f"\n🚀 开始处理知识库: {kb_config.kb_id}")
         engine = RAGEngine(
             kb_id=kb_config.kb_id,
             use_markdown_header_split=kb_config.use_markdown_header_split,
@@ -98,25 +71,61 @@ def handle_load_all(args):
             pattern=kb_config.file_pattern,
             verbose=True
         )
+    print("\n✅ 所有向量化任务已完成。")
+    return 0
+
+
+def handle_chat(args):
+    """交互对话模式逻辑"""
+    print(f"\n💬 进入交互对话模式 (知识库: {args.kb_id})")
+    print("输入 'exit', 'quit' 或 'q' 退出。输入 'clear' 清屏。")
+    print("-" * 50)
+    
+    engine = RAGEngine(kb_id=args.kb_id)
+    
+    while True:
+        try:
+            question = input("\n👤 用户: ").strip()
+            
+            if not question:
+                continue
+            if question.lower() in ["exit", "quit", "q"]:
+                print("👋 已退出对话。")
+                break
+            if question.lower() == "clear":
+                print("\033c", end="") # 清屏
+                continue
+                
+            print("🤖 AI 正在思考...", end="", flush=True)
+            result = engine.query(question, top_k=args.top_k)
+            print("\r" + " " * 30 + "\r", end="") # 清除“思考中”提示
+            
+            print(f"🤖 AI: {result['answer']}")
+            
+            if args.show_sources:
+                print("\n   [参考来源]")
+                for i, chunk in enumerate(result.get("chunks", []), 1):
+                    print(f"   ({i}) {chunk.get('text', '')[:80]}... (Score: {chunk.get('score', 0):.4f})")
+                    
+        except KeyboardInterrupt:
+            print("\n👋 已退出对话。")
+            break
+        except Exception as e:
+            print(f"\n❌ 发生错误: {e}")
     return 0
 
 
 def handle_query(args):
-    """处理查询逻辑"""
+    """单次查询逻辑"""
     engine = RAGEngine(kb_id=args.kb_id)
     result = engine.query(args.question, top_k=args.top_k)
     
-    print("\n📚 检索到的相关内容:")
-    for i, chunk in enumerate(result.get("chunks", []), 1):
-        print(f"  [{i}] (Score: {chunk.get('score', 0):.4f}) {chunk.get('text', '')[:100]}...")
-    
-    print("\n🤖 AI 回答:")
-    print(f"  {result.get('answer', '')}")
+    print(f"\n🤖 AI 回答: {result.get('answer', '')}")
     return 0
 
 
 def handle_stats(args):
-    """处理统计逻辑"""
+    """统计逻辑"""
     engine = RAGEngine(kb_id=args.kb_id)
     stats = engine.get_stats()
     print(f"\n📊 知识库 [{args.kb_id}] 统计信息:")
@@ -129,39 +138,40 @@ def main():
     parser = argparse.ArgumentParser(description="RAG 引擎统一入口")
     subparsers = parser.add_subparsers(dest="command")
     
-    # 1. ingest 命令 (只做向量化并退出)
-    ingest_parser = subparsers.add_parser("ingest", help="执行向量化并保存到数据库")
-    ingest_parser.add_argument("--kb-id", required=True, help="知识库 ID")
-    ingest_parser.add_argument("--file", help="单个文件路径")
-    ingest_parser.add_argument("--dir", help="文件夹路径")
-    ingest_parser.add_argument("--pattern", default="*.md", help="文件匹配模式")
-    ingest_parser.add_argument("--no-markdown-split", action="store_true", help="禁用 Markdown 标题分割")
+    # 1. load 命令 - 仅支持通过 JSON 配置文件加载
+    load_parser = subparsers.add_parser("load", help="从 JSON 配置文件加载并向量化知识库")
+    load_parser.add_argument("--config", default="knowledge_bases.json", help="配置文件路径")
+    load_parser.add_argument("--kb-id", help="指定要加载的知识库 ID")
     
-    # 2. query 命令
-    query_parser = subparsers.add_parser("query", help="查询知识库")
+    # 2. chat 命令 - 交互式对话
+    chat_parser = subparsers.add_parser("chat", help="进入交互式对话模式")
+    chat_parser.add_argument("--kb-id", required=True, help="要对话的知识库 ID")
+    chat_parser.add_argument("--top-k", type=int, default=4, help="检索数量")
+    chat_parser.add_argument("--show-sources", action="store_true", help="显示参考来源")
+    
+    # 3. query 命令 - 单次查询
+    query_parser = subparsers.add_parser("query", help="单次问题查询")
     query_parser.add_argument("--kb-id", required=True, help="知识库 ID")
     query_parser.add_argument("--question", required=True, help="问题内容")
     query_parser.add_argument("--top-k", type=int, default=4, help="检索数量")
     
-    # 3. stats 命令
-    stats_parser = subparsers.add_parser("stats", help="查看统计信息")
+    # 4. stats 命令 - 查看统计
+    stats_parser = subparsers.add_parser("stats", help="查看知识库统计信息")
     stats_parser.add_argument("--kb-id", required=True, help="知识库 ID")
-    
-    # 默认行为：从配置加载所有知识库
-    parser.add_argument("--config", default="knowledge_bases.json", help="配置文件路径")
-    parser.add_argument("--kb-id", help="指定要加载的知识库 ID")
     
     args = parser.parse_args()
     
-    if args.command == "ingest":
-        sys.exit(handle_ingest(args))
+    if args.command == "load":
+        sys.exit(handle_load(args))
+    elif args.command == "chat":
+        sys.exit(handle_chat(args))
     elif args.command == "query":
         sys.exit(handle_query(args))
     elif args.command == "stats":
         sys.exit(handle_stats(args))
     else:
-        # 如果没有子命令，默认执行批量加载
-        sys.exit(handle_load_all(args))
+        # 默认如果不带命令，显示帮助
+        parser.print_help()
 
 
 if __name__ == "__main__":
