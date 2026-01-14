@@ -81,6 +81,11 @@ class RAGEngine:
                     self.kb_config = kb
                     break
         
+        if self.kb_config:
+            print(f"     ⚙️  已加载知识库配置: {kb_id} (Sparse: {self.kb_config.use_sparse}, Multi: {self.kb_config.use_multi_vector})")
+        else:
+            print(f"     ⚠️  未找到知识库 {kb_id} 的特定配置，将使用默认参数")
+        
         # 设置默认检索数量
         self.default_top_k = self.kb_config.top_k if self.kb_config else 4
     
@@ -269,7 +274,6 @@ class RAGEngine:
             # 注意：这里只计算几十个片段，速度会很快
             candidate_emb = self.embedding_client.embed_texts(
                 candidate_texts, 
-                return_dense=False, 
                 return_sparse=False, 
                 return_multi=True
             )

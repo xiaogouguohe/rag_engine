@@ -122,16 +122,16 @@ def evaluate_retrieval(
     
     for i, sample in enumerate(samples, 1):
         question = sample["question"]
-        relevant_parent_ids = set(sample.get("relevant_chunks", []))
+        # RAGAS 标准格式：contexts 字段包含了生成该问题时参考的原始文本
+        gold_contexts = sample.get("contexts", [])
         
-        if not relevant_parent_ids:
+        if not gold_contexts:
             continue
         
         print(f"[{i}/{len(samples)}] {question[:50]}...", end=" ")
         
         try:
             # 使用引擎的 query 接口进行检索（这会自动处理 Dense/Sparse/Rerank 等配置）
-            # 我们只需要检索结果，不需要生成回答，所以设置系统提示词为空（或忽略回答）
             query_result = engine.query(
                 question=question,
                 top_k=top_k,
@@ -139,36 +139,41 @@ def evaluate_retrieval(
             
             # 获取检索到的 chunk 列表
             retrieved_chunks = query_result.get("sources", [])
+            retrieved_texts = [c.get("text", "") for c in retrieved_chunks]
             
-            # 获取检索到的 parent_id
-            retrieved_parent_ids = set()
-            for chunk in retrieved_chunks:
-                parent_id = chunk.get("doc_id")
-                if parent_id:
-                    retrieved_parent_ids.add(parent_id)
+            # 判定命中 (Hit)
+            # 逻辑：我们要看 gold_contexts 里的每一段，是否在检索结果中出现过
+            hit_gold_indices = set() # 记录哪些金标准文本被找到了
+            relevant_retrieved_count = 0 # 记录检索出的片段中有几个是相关的
+            mrr = 0.0
+            
+            for rank, ret_text in enumerate(retrieved_texts, 1):
+                ret_is_relevant = False
+                clean_ret = "".join(ret_text.split())
+                
+                for g_idx, gold_text in enumerate(gold_contexts):
+                    clean_gold = "".join(gold_text.split())
+                    
+                    # 只要检索片段和金标准有包含关系，就认为相关
+                    if clean_ret in clean_gold or clean_gold in clean_ret:
+                        hit_gold_indices.add(g_idx)
+                        ret_is_relevant = True
+                
+                if ret_is_relevant:
+                    relevant_retrieved_count += 1
+                    if mrr == 0:
+                        mrr = 1.0 / rank
             
             # 计算指标
-            relevant_retrieved = relevant_parent_ids.intersection(retrieved_parent_ids)
+            # Recall: 命中的金标准文本数量 / 总金标准文本数量
+            recall = len(hit_gold_indices) / len(gold_contexts) if gold_contexts else 0.0
+            # Precision: 检索出的相关片段数量 / 检索的总片段数量 (top_k)
+            precision = relevant_retrieved_count / len(retrieved_texts) if retrieved_texts else 0.0
             
-            # Recall
-            recall = len(relevant_retrieved) / len(relevant_parent_ids) if relevant_parent_ids else 0.0
             total_recall += recall
-            
-            # Precision
-            precision = len(relevant_retrieved) / len(retrieved_parent_ids) if retrieved_parent_ids else 0.0
             total_precision += precision
-            
-            # MRR
-            mrr = 0.0
-            for rank, chunk in enumerate(retrieved_chunks, 1):
-                parent_id = chunk.get("doc_id")
-                if parent_id in relevant_parent_ids:
-                    mrr = 1.0 / rank
-                    break
             total_mrr += mrr
-            
-            # Hit Rate
-            if relevant_retrieved:
+            if len(hit_gold_indices) > 0:
                 total_hit += 1
             
             print(f"Recall={recall:.2f}, Precision={precision:.2f}, MRR={mrr:.2f}")

@@ -128,12 +128,13 @@ class AppConfig:
                 # 自动查找项目根目录的 .env 文件
                 # 从当前文件向上查找，直到找到包含 .env 的目录或到达文件系统根目录
                 current_file = Path(__file__).resolve()
-                project_root = current_file.parent
+                # config.py 在 rag_engine/config/ 目录下，所以 parent.parent 才是 rag_engine/
+                project_root = current_file.parent.parent
                 env_path = project_root / ".env"
                 if env_path.exists():
                     load_dotenv(env_path, override=False)
                 else:
-                    # 如果当前目录没有，尝试加载（dotenv 会自动查找）
+                    # 如果没找到，尝试在当前工作目录找
                     load_dotenv(override=False)
 
         def _get(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -163,9 +164,36 @@ class AppConfig:
 
         storage_path = _get("STORAGE_PATH", "./data/indices")
         
-        # 解析知识库配置（可选，格式：KB_ID:SOURCE_PATH:FILE_PATTERN）
-        # 例如：RECIPES_KB:../HowToCook/dishes:*.md
+        # 自动加载 rag_config.json 里的知识库配置
         knowledge_bases = None
+        # 使用与 .env 相同的逻辑确定项目根目录
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parent.parent
+        config_json_path = project_root / "rag_config.json"
+        
+        if config_json_path.exists():
+            try:
+                import json
+                with open(config_json_path, "r", encoding="utf-8") as f:
+                    json_data = json.load(f)
+                
+                kb_configs = []
+                for kb in json_data.get("knowledge_bases", []):
+                    kb_configs.append(KnowledgeBaseConfig(
+                        kb_id=kb["kb_id"],
+                        source_path=kb["source_path"],
+                        file_pattern=kb.get("file_pattern", "*.md"),
+                        top_k=kb.get("top_k", 4),
+                        use_sparse=kb.get("use_sparse", False),
+                        use_multi_vector=kb.get("use_multi_vector", False),
+                        use_markdown_header_split=kb.get("use_markdown_header_split", True),
+                    ))
+                if kb_configs:
+                    knowledge_bases = kb_configs
+            except Exception as e:
+                print(f"⚠️  从 rag_config.json 加载配置失败: {e}")
+
+        # 如果环境变量也有配置，则追加或覆盖
         kb_config_str = _get("KNOWLEDGE_BASES")
         if kb_config_str:
             kb_configs = []

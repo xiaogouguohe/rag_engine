@@ -752,29 +752,61 @@ def generate_ragas_dataset_with_knowledge_graph(
         print("-" * 60)
         
         # 8. 转换为目标格式
-        print("正在转换数据格式...")
+        print("正在转换数据格式并提取源文档 ID (通过内容反查)...")
         samples = []
         
+        # 创建一个 内容 -> ID 的映射表，方便快速反查
+        content_to_id = {}
+        for d in langchain_docs:
+            content_to_id[d.page_content.strip()] = d.metadata.get("doc_id") or d.metadata.get("parent_id")
+
         if testset_df is not None:
             for _, row in testset_df.iterrows():
+                relevant_chunks = []
+                # 1. 尝试从 metadata 提取
+                meta_list = row.get("metadata", [])
+                if isinstance(meta_list, list):
+                    for meta in meta_list:
+                        if isinstance(meta, dict):
+                            doc_id = meta.get("doc_id") or meta.get("parent_id")
+                            if doc_id: relevant_chunks.append(doc_id)
+                
+                # 2. 如果没提取到，通过 contexts 内容反查
+                if not relevant_chunks:
+                    contexts = row.get("reference_contexts", row.get("contexts", []))
+                    for ctx in contexts:
+                        ctx_str = ctx.strip() if isinstance(ctx, str) else ""
+                        if ctx_str in content_to_id:
+                            relevant_chunks.append(content_to_id[ctx_str])
+                
                 sample = {
                     "question": row.get("user_input", row.get("question", "")),
                     "answer": "",
                     "ground_truth": row.get("reference", row.get("ground_truth", "")),
                     "contexts": row.get("reference_contexts", row.get("contexts", [])),
+                    "relevant_chunks": list(set(relevant_chunks)),
                 }
                 samples.append(sample)
         else:
+            # 非 DataFrame 格式的备选路径 (同样逻辑)
             questions = getattr(testset, 'questions', getattr(testset, 'user_input', []))
             ground_truths = getattr(testset, 'ground_truth', getattr(testset, 'reference', []))
             contexts_list = getattr(testset, 'contexts', getattr(testset, 'reference_contexts', []))
             
             for i in range(len(questions)):
+                relevant_chunks = []
+                ctxs = contexts_list[i] if i < len(contexts_list) else []
+                for ctx in ctxs:
+                    ctx_str = ctx.strip() if isinstance(ctx, str) else ""
+                    if ctx_str in content_to_id:
+                        relevant_chunks.append(content_to_id[ctx_str])
+                
                 sample = {
                     "question": questions[i] if i < len(questions) else "",
                     "answer": "",
                     "ground_truth": ground_truths[i] if i < len(ground_truths) else "",
-                    "contexts": contexts_list[i] if i < len(contexts_list) else [],
+                    "contexts": ctxs,
+                    "relevant_chunks": list(set(relevant_chunks)),
                 }
                 samples.append(sample)
         

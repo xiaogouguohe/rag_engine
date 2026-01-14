@@ -136,7 +136,13 @@ class VectorStore:
         index_params = self.client.prepare_index_params()
         index_params.add_index(field_name="vector", metric_type="COSINE")
         if use_sparse:
-            index_params.add_index(field_name="sparse_vector", metric_type="IP") # 稀疏向量通常用内积
+            # Milvus Lite 本地模式对稀疏向量不支持 AUTOINDEX
+            # 必须显式指定为 SPARSE_INVERTED_INDEX 或 SPARSE_WAND
+            index_params.add_index(
+                field_name="sparse_vector", 
+                metric_type="IP", 
+                index_type="SPARSE_INVERTED_INDEX"
+            )
         
         self.client.create_index(collection_name, index_params)
         
