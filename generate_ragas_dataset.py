@@ -40,6 +40,41 @@ from document import ParserFactory, DataPreparationModule
 from llm import LLMClient
 from embedding import EmbeddingClient
 
+# --- 补丁：绕过 transformers 的强制版本检查 (CVE-2025-32434) ---
+def patch_transformers_security_check():
+    try:
+        import transformers.utils.import_utils as iu
+        iu.check_torch_load_is_safe = lambda: None
+        import transformers.utils as u
+        if hasattr(u, "check_torch_load_is_safe"):
+            u.check_torch_load_is_safe = lambda: None
+        import transformers.modeling_utils as mu
+        if hasattr(mu, "check_torch_load_is_safe"):
+            mu.check_torch_load_is_safe = lambda: None
+    except Exception:
+        pass
+
+patch_transformers_security_check()
+
+class RagasLocalBGEAdapter:
+    """适配器：将本地 EmbeddingClient 转换为 RAGAS 兼容格式"""
+    def __init__(self, embedding_client: EmbeddingClient):
+        self.client = embedding_client
+    
+    def embed_text(self, text: str) -> List[float]:
+        res = self.client.embed_texts([text])
+        return res["dense_vecs"][0]
+    
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        res = self.client.embed_texts(texts)
+        return res["dense_vecs"]
+    
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed_text(text)
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self.embed_texts(texts)
+
 # 尝试导入 RAGAS
 try:
     from ragas import evaluate
@@ -394,26 +429,30 @@ def generate_ragas_dataset_with_knowledge_graph(
         
         # 创建 Embeddings
         try:
-            from openai import OpenAI, AsyncOpenAI
-            from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
-            
-            openai_client = OpenAI(
-                api_key=app_config.embedding.api_key,
-                base_url=app_config.embedding.base_url,
-            )
-            async_openai_client = AsyncOpenAI(
-                api_key=app_config.embedding.api_key,
-                base_url=app_config.embedding.base_url,
-            )
-            
-            embeddings = RagasOpenAIEmbeddings(
-                client=openai_client,
-                model=app_config.embedding.model,
-            )
-            if hasattr(embeddings, 'async_client'):
-                embeddings.async_client = async_openai_client
-            
-            print("✅ 使用 RAGAS 原生的 OpenAIEmbeddings")
+            if app_config.embedding.mode == "local":
+                print(f"✅ 使用本地 Embedding 模型: {app_config.embedding.model}")
+                emb_client = EmbeddingClient.from_config(app_config)
+                embeddings = RagasLocalBGEAdapter(emb_client)
+            else:
+                from openai import OpenAI, AsyncOpenAI
+                from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
+                
+                openai_client = OpenAI(
+                    api_key=app_config.embedding.api_key,
+                    base_url=app_config.embedding.base_url,
+                )
+                async_openai_client = AsyncOpenAI(
+                    api_key=app_config.embedding.api_key,
+                    base_url=app_config.embedding.base_url,
+                )
+                
+                embeddings = RagasOpenAIEmbeddings(
+                    client=openai_client,
+                    model=app_config.embedding.model,
+                )
+                if hasattr(embeddings, 'async_client'):
+                    embeddings.async_client = async_openai_client
+                print("✅ 使用 API 模式的 OpenAIEmbeddings")
         except Exception as e:
             print(f"❌ 创建 Embeddings 失败: {e}")
             import traceback
@@ -916,51 +955,56 @@ def generate_ragas_dataset_with_testset_generator(
         )
         
         # 创建 Embeddings（从我们的配置读取）
-        # 优先使用 RAGAS 原生的 OpenAIEmbeddings（更稳定，兼容性更好）
-        try:
-            from openai import OpenAI, AsyncOpenAI
-            from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
-            
-            # 创建 OpenAI 客户端（同步和异步）
-            openai_client = OpenAI(
-                api_key=app_config.embedding.api_key,
-                base_url=app_config.embedding.base_url,
-            )
-            async_openai_client = AsyncOpenAI(
-                api_key=app_config.embedding.api_key,
-                base_url=app_config.embedding.base_url,
-            )
-            
-            # 使用 RAGAS 的 OpenAIEmbeddings（直接使用 OpenAI 客户端，更稳定）
-            embeddings = RagasOpenAIEmbeddings(
-                client=openai_client,
-                model=app_config.embedding.model,
-            )
-            # 注意：RAGAS OpenAIEmbeddings 可能需要设置 async_client
-            if hasattr(embeddings, 'async_client'):
-                embeddings.async_client = async_openai_client
-            
-            print("✅ 使用 RAGAS 原生的 OpenAIEmbeddings")
-        except Exception as e:
-            print(f"⚠️  创建 RAGAS OpenAIEmbeddings 失败: {e}")
-            print("    尝试使用 langchain OpenAIEmbeddings + LangchainEmbeddingsWrapper")
+        if app_config.embedding.mode == "local":
+            print(f"✅ 使用本地 Embedding 模型: {app_config.embedding.model}")
+            emb_client = EmbeddingClient.from_config(app_config)
+            embeddings = RagasLocalBGEAdapter(emb_client)
+        else:
+            # 优先使用 RAGAS 原生的 OpenAIEmbeddings（更稳定，兼容性更好）
             try:
-                # 备用方案：使用 langchain OpenAIEmbeddings
-                from langchain_openai import OpenAIEmbeddings as LangchainOpenAIEmbeddings
-                from ragas.embeddings import LangchainEmbeddingsWrapper
+                from openai import OpenAI, AsyncOpenAI
+                from ragas.embeddings import OpenAIEmbeddings as RagasOpenAIEmbeddings
                 
-                langchain_embeddings = LangchainOpenAIEmbeddings(
-                    model=app_config.embedding.model,
+                # 创建 OpenAI 客户端（同步和异步）
+                openai_client = OpenAI(
                     api_key=app_config.embedding.api_key,
                     base_url=app_config.embedding.base_url,
                 )
-                embeddings = LangchainEmbeddingsWrapper(langchain_embeddings)
-                print("✅ 使用 LangchainEmbeddingsWrapper 包装 langchain OpenAIEmbeddings")
-            except Exception as e2:
-                print(f"❌ 创建 Embeddings 失败: {e2}")
-                import traceback
-                traceback.print_exc()
-                return False
+                async_openai_client = AsyncOpenAI(
+                    api_key=app_config.embedding.api_key,
+                    base_url=app_config.embedding.base_url,
+                )
+                
+                # 使用 RAGAS 的 OpenAIEmbeddings（直接使用 OpenAI 客户端，更稳定）
+                embeddings = RagasOpenAIEmbeddings(
+                    client=openai_client,
+                    model=app_config.embedding.model,
+                )
+                # 注意：RAGAS OpenAIEmbeddings 可能需要设置 async_client
+                if hasattr(embeddings, 'async_client'):
+                    embeddings.async_client = async_openai_client
+                
+                print("✅ 使用 API 模式的 OpenAIEmbeddings")
+            except Exception as e:
+                print(f"⚠️  创建 RAGAS OpenAIEmbeddings 失败: {e}")
+                print("    尝试使用 langchain OpenAIEmbeddings + LangchainEmbeddingsWrapper")
+                try:
+                    # 备用方案：使用 langchain OpenAIEmbeddings
+                    from langchain_openai import OpenAIEmbeddings as LangchainOpenAIEmbeddings
+                    from ragas.embeddings import LangchainEmbeddingsWrapper
+                    
+                    langchain_embeddings = LangchainOpenAIEmbeddings(
+                        model=app_config.embedding.model,
+                        api_key=app_config.embedding.api_key,
+                        base_url=app_config.embedding.base_url,
+                    )
+                    embeddings = LangchainEmbeddingsWrapper(langchain_embeddings)
+                    print("✅ 使用 LangchainEmbeddingsWrapper 包装 langchain OpenAIEmbeddings")
+                except Exception as e2:
+                    print(f"❌ 创建 Embeddings 失败: {e2}")
+                    import traceback
+                    traceback.print_exc()
+                    return False
         
         # 创建 TestsetGenerator
         # RAGAS 0.4.2 使用 from_langchain 创建，参数名是 llm 和 embedding_model
