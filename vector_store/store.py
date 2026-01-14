@@ -180,16 +180,6 @@ class VectorStore:
                 **metadata.get("metadata", {}),
             }
             
-            # 如果有 ColBERT 向量，由于太大，我们将其转为 bytes 或列表存入 metadata
-            # 或者如果只是演示，我们可以选择不存，或者存入动态字段
-            if colbert_vectors is not None:
-                # 注意：ColBERT 向量很大，存入数据库会显著增加体积
-                # 这里我们将其压缩存入 metadata
-                import numpy as np
-                c_vec = colbert_vectors[i]
-                if isinstance(c_vec, np.ndarray):
-                    metadata_dict["colbert_vec"] = c_vec.tolist()
-
             item = {
                 "vector": vector,
                 "text": text,

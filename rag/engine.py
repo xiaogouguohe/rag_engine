@@ -133,12 +133,12 @@ class RAGEngine:
         
         # 6. 向量化 (根据配置决定是否生成多种向量)
         use_sparse = self.kb_config.use_sparse if self.kb_config else False
-        use_multi = self.kb_config.use_multi_vector if self.kb_config else False
+        # 存储时不包含 multi_vector
         
         emb_results = self.embedding_client.embed_texts(
             texts, 
             return_sparse=use_sparse,
-            return_multi=use_multi
+            return_multi=False
         )
         
         # 7. 存储到向量数据库
@@ -147,8 +147,7 @@ class RAGEngine:
             texts=texts,
             vectors=emb_results["dense_vecs"],
             metadatas=metadatas,
-            sparse_vectors=emb_results.get("sparse_vecs"),
-            colbert_vectors=emb_results.get("multi_vecs")
+            sparse_vectors=emb_results.get("sparse_vecs")
         )
         
         return {
@@ -259,32 +258,45 @@ class RAGEngine:
             query_sparse_vector=query_sparse,
         )
         
-        # 3. 如果启用多向量精排 (ColBERT Rerank)
+        # 3. 如果启用多向量精排 (ColBERT Online Rerank)
         if use_multi and query_multi is not None and search_results:
-            import numpy as np
+            print(f"     🎯 正在对 {len(search_results)} 个候选片段进行在线多向量精排 (ColBERT)...")
+            
+            # 获取候选片段的原始文本
+            candidate_texts = [res[1].text for res in search_results]
+            
+            # 现场计算候选片段的多向量 (Online Encoding)
+            # 注意：这里只计算几十个片段，速度会很快
+            candidate_emb = self.embedding_client.embed_texts(
+                candidate_texts, 
+                return_dense=False, 
+                return_sparse=False, 
+                return_multi=True
+            )
+            candidate_multi_vecs = candidate_emb.get("multi_vecs")
+            
             reranked_results = []
-            
-            print(f"     🎯 正在对 {len(search_results)} 个候选片段进行多向量精排 (ColBERT)...")
-            
-            for score, metadata in search_results:
-                # 从元数据中获取存储的 ColBERT 向量
-                doc_multi_list = metadata.metadata.get("colbert_vec")
-                if doc_multi_list:
-                    doc_multi = np.array(doc_multi_list)
+            if candidate_multi_vecs is not None:
+                for i, (score, metadata) in enumerate(search_results):
+                    doc_multi = candidate_multi_vecs[i]
+                    
                     # 计算 ColBERT MaxSim 分数
                     # query_multi: [q_len, dim], doc_multi: [d_len, dim]
-                    # score = sum(max(query_multi @ doc_multi.T, axis=1))
                     sim_matrix = np.matmul(query_multi, doc_multi.T)
                     max_sim_score = np.mean(np.max(sim_matrix, axis=1))
-                    # 融合分数 (这里简单加权)
+                    
+                    # 融合分数
                     final_score = score * 0.3 + max_sim_score * 0.7
                     reranked_results.append((final_score, metadata))
-                else:
-                    reranked_results.append((score, metadata))
-            
-            # 重新排序并取 top_k
-            reranked_results.sort(key=lambda x: x[0], reverse=True)
-            search_results = reranked_results[:final_top_k]
+                
+                # 重新排序并取最终 top_k
+                reranked_results.sort(key=lambda x: x[0], reverse=True)
+                search_results = reranked_results[:final_top_k]
+            else:
+                search_results = search_results[:final_top_k]
+        else:
+            # 如果没开精排，直接取 top_k
+            search_results = search_results[:final_top_k]
         
         # 4. 过滤低相似度的结果
         filtered_results = [
