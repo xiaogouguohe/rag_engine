@@ -318,10 +318,10 @@ result = engine.ingest_document("document.md")
 
 ```bash
 # 加载所有配置的知识库
-python load_knowledge_bases.py
+python3 main.py
 
 # 只加载指定的知识库
-python load_knowledge_bases.py --kb-id recipes_kb
+python3 main.py --kb-id recipes_kb
 ```
 
 **方式二：使用环境变量**
@@ -337,49 +337,15 @@ RAG_KNOWLEDGE_BASES=recipes_kb:../HowToCook/dishes:*.md
 然后运行：
 
 ```bash
-python load_knowledge_bases.py
+python3 main.py
 ```
 
 **方式三：命令行指定路径**
 
 ```bash
 # 使用启动脚本加载指定目录
-python load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
+python3 load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
 ```
-
-### 从 GitHub 加载知识库示例
-
-如果你想从 GitHub 仓库加载大量文档（如菜谱知识库），可以使用专门的脚本：
-
-**简单方式（推荐）：**
-
-```bash
-# 1. 先 clone 仓库到本地
-cd /Users/xiaogouguohe/workspace
-git clone https://github.com/Anduin2017/HowToCook.git
-
-# 2. 配置 knowledge_bases.json 或使用命令行
-cd rag_engine
-python load_knowledge_bases.py  # 从配置文件加载
-# 或
-python load_recipes.py --kb-id recipes_kb --dir ../HowToCook/dishes
-```
-
-**高级方式（支持更多选项）：**
-
-```bash
-# 从本地目录加载
-python scripts/load_github_recipes.py --kb-id recipes_kb --local-dir /path/to/HowToCook/dishes
-
-# 自动 clone 并加载
-python scripts/load_github_recipes.py --kb-id recipes_kb --github-url https://github.com/Anduin2017/HowToCook --subdir dishes
-```
-
-脚本会自动：
-- 递归查找所有 `.md` 文件（`load_recipes.py` 只加载 .md）
-- 批量加载到知识库
-- 显示加载进度和统计信息
-- 支持 Markdown 标题分割（默认启用，适合菜谱结构）
 
 ## RAG 系统评估标准
 
