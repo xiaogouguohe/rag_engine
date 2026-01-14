@@ -5,6 +5,8 @@
       "source_path": "../HowToCook/dishes",
       "file_pattern": "*.md",
       "top_k": 4,
+      "use_sparse": true,
+      "use_multi_vector": false,
       "use_markdown_header_split": true,
       "description": "菜谱知识库，包含各种菜谱的 Markdown 文件"
     }

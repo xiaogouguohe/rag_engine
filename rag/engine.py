@@ -14,6 +14,7 @@ RAG 引擎
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import uuid
+import numpy as np
 
 from config import AppConfig
 from document import (
@@ -130,15 +131,24 @@ class RAGEngine:
         texts = [chunk.page_content for chunk in doc_chunks]
         metadatas = [chunk.metadata for chunk in doc_chunks]
         
-        # 6. 向量化
-        vectors = self.embedding_client.embed_texts(texts)
+        # 6. 向量化 (根据配置决定是否生成多种向量)
+        use_sparse = self.kb_config.use_sparse if self.kb_config else False
+        use_multi = self.kb_config.use_multi_vector if self.kb_config else False
+        
+        emb_results = self.embedding_client.embed_texts(
+            texts, 
+            return_sparse=use_sparse,
+            return_multi=use_multi
+        )
         
         # 7. 存储到向量数据库
         chunk_ids = self.vector_store.add_texts(
             kb_id=self.kb_id,
             texts=texts,
-            vectors=vectors,
+            vectors=emb_results["dense_vecs"],
             metadatas=metadatas,
+            sparse_vectors=emb_results.get("sparse_vecs"),
+            colbert_vectors=emb_results.get("multi_vecs")
         )
         
         return {
@@ -221,40 +231,62 @@ class RAGEngine:
         system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        问答流程：问题 → 向量化 → 检索 → 生成回答
-        
-        Args:
-            question: 用户问题
-            top_k: 检索 top-k 个相关块（如果为 None 则使用配置中的默认值）
-            similarity_threshold: 相似度阈值（低于此值的块将被过滤）
-            system_prompt: 系统提示词（可选）
-        
-        Returns:
-            回答结果：
-            {
-                "answer": str,  # LLM 生成的回答
-                "sources": List[Dict],  # 检索到的相关块
-                "query": str,  # 原始问题
-            }
+        问答流程：支持密集、稀疏、多向量检索。
         """
         if not question.strip():
             raise ValueError("问题不能为空")
         
-        # 0. 确定最终使用的 top_k
+        # 0. 获取配置
         final_top_k = top_k if top_k is not None else self.default_top_k
+        use_sparse = self.kb_config.use_sparse if self.kb_config else False
+        use_multi = self.kb_config.use_multi_vector if self.kb_config else False
         
         # 1. 问题向量化
-        query_vectors = self.embedding_client.embed_texts([question])
-        query_vector = query_vectors[0]
+        emb_results = self.embedding_client.embed_texts(
+            [question], 
+            return_sparse=use_sparse,
+            return_multi=use_multi
+        )
+        query_dense = emb_results["dense_vecs"][0]
+        query_sparse = emb_results.get("sparse_vecs", [None])[0]
+        query_multi = emb_results.get("multi_vecs", [None])[0]
         
-        # 2. 检索相关块
+        # 2. 检索相关块 (混合检索: Dense + Sparse)
         search_results = self.vector_store.search(
             kb_id=self.kb_id,
-            query_vector=query_vector,
-            top_k=final_top_k,
+            query_vector=query_dense,
+            top_k=final_top_k * 3 if use_multi else final_top_k, # 如果有精排，先多捞点
+            query_sparse_vector=query_sparse,
         )
         
-        # 3. 过滤低相似度的结果
+        # 3. 如果启用多向量精排 (ColBERT Rerank)
+        if use_multi and query_multi is not None and search_results:
+            import numpy as np
+            reranked_results = []
+            
+            print(f"     🎯 正在对 {len(search_results)} 个候选片段进行多向量精排 (ColBERT)...")
+            
+            for score, metadata in search_results:
+                # 从元数据中获取存储的 ColBERT 向量
+                doc_multi_list = metadata.metadata.get("colbert_vec")
+                if doc_multi_list:
+                    doc_multi = np.array(doc_multi_list)
+                    # 计算 ColBERT MaxSim 分数
+                    # query_multi: [q_len, dim], doc_multi: [d_len, dim]
+                    # score = sum(max(query_multi @ doc_multi.T, axis=1))
+                    sim_matrix = np.matmul(query_multi, doc_multi.T)
+                    max_sim_score = np.mean(np.max(sim_matrix, axis=1))
+                    # 融合分数 (这里简单加权)
+                    final_score = score * 0.3 + max_sim_score * 0.7
+                    reranked_results.append((final_score, metadata))
+                else:
+                    reranked_results.append((score, metadata))
+            
+            # 重新排序并取 top_k
+            reranked_results.sort(key=lambda x: x[0], reverse=True)
+            search_results = reranked_results[:final_top_k]
+        
+        # 4. 过滤低相似度的结果
         filtered_results = [
             (score, metadata) for score, metadata in search_results
             if score >= similarity_threshold

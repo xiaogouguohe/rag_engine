@@ -16,6 +16,7 @@ from __future__ import annotations
 """
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
@@ -84,66 +85,92 @@ class VectorStore:
             self._collections[kb_id] = collection_name
         return self._collections[kb_id]
     
-    def _ensure_collection(self, kb_id: str, vector_dim: int):
-        """确保 collection 存在（参考 cloud-edge-milk-tea-agent 的实现）"""
+    def _ensure_collection(self, kb_id: str, vector_dim: int, use_sparse: bool = False):
+        """确保 collection 存在，支持多向量字段"""
         collection_name = self._get_collection_name(kb_id)
         
         if self.client.has_collection(collection_name):
-            return collection_name
+            # 检查现有 collection 是否包含 sparse 字段
+            stats = self.client.describe_collection(collection_name)
+            has_sparse = False
+            if isinstance(stats, dict) and "fields" in stats:
+                has_sparse = any(f.get("name") == "sparse_vector" for f in stats["fields"])
+            
+            # 如果配置要求使用稀疏向量，但现有集合没有，则需要重建
+            if use_sparse and not has_sparse:
+                print(f"     ⚠️  知识库 {kb_id} 架构不匹配 (缺少稀疏向量字段)，正在重建...")
+                self.client.drop_collection(collection_name)
+            else:
+                return collection_name
         
-        # 创建新 collection（使用余弦相似度，参考 cloud-edge-milk-tea-agent）
+        # 使用详细的 Schema 创建支持多向量的 collection
+        from pymilvus import DataType
+        schema = self.client.create_schema(auto_id=True, enable_dynamic_field=True)
+        
+        # 主键
+        schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
+        # 密集向量
+        schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=vector_dim)
+        # 原始文本
+        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535)
+        # 元数据 JSON
+        schema.add_field(field_name="metadata", datatype=DataType.VARCHAR, max_length=65535)
+        
+        # 如果启用稀疏向量
+        if use_sparse:
+            # Milvus Lite 2.4+ 支持 SPARSE_FLOAT_VECTOR
+            try:
+                schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
+            except Exception as e:
+                print(f"     ⚠️  当前 Milvus Lite 版本不支持原生稀疏向量，将跳过: {e}")
+                use_sparse = False
+
         self.client.create_collection(
             collection_name=collection_name,
-            dimension=vector_dim,
-            metric_type="COSINE",  # 使用余弦相似度
-            auto_id=True,  # 自动生成 ID
+            schema=schema,
+            # 索引参数
+            index_params=None # Milvus Lite 会自动创建索引
         )
         
+        # 密集向量索引
+        index_params = self.client.prepare_index_params()
+        index_params.add_index(field_name="vector", metric_type="COSINE")
+        if use_sparse:
+            index_params.add_index(field_name="sparse_vector", metric_type="IP") # 稀疏向量通常用内积
+        
+        self.client.create_index(collection_name, index_params)
+        
         return collection_name
-    
+
     def add_texts(
         self,
         kb_id: str,
         texts: List[str],
         vectors: List[List[float]],
         metadatas: Optional[List[Dict[str, Any]]] = None,
+        sparse_vectors: Optional[List[Dict[int, float]]] = None,
+        colbert_vectors: Optional[List[Any]] = None,
     ) -> List[str]:
         """
-        添加文本和向量到指定知识库（参考 RAGFlow 的 insert_es 方法和 cloud-edge-milk-tea-agent 的实现）。
-        
-        Args:
-            kb_id: 知识库 ID
-            texts: 文本列表
-            vectors: 向量列表（与 texts 一一对应）
-            metadatas: 元数据列表（可选，与 texts 一一对应）
-        
-        Returns:
-            chunk_id 列表
+        添加文本和多种向量到指定知识库。
         """
         if not texts or not vectors:
             return []
         
-        if len(texts) != len(vectors):
-            raise ValueError(f"texts 和 vectors 数量不一致: {len(texts)} vs {len(vectors)}")
-        
         vector_dim = len(vectors[0])
-        if not all(len(v) == vector_dim for v in vectors):
-            raise ValueError("所有向量的维度必须一致")
+        use_sparse = sparse_vectors is not None
         
         # 确保 collection 存在
-        collection_name = self._ensure_collection(kb_id, vector_dim)
+        collection_name = self._ensure_collection(kb_id, vector_dim, use_sparse=use_sparse)
         
-        # 准备数据（参考 cloud-edge-milk-tea-agent 的格式）
         data = []
         chunk_ids = []
         
         for i, (text, vector) in enumerate(zip(texts, vectors)):
-            chunk_id = f"{kb_id}_chunk_{i}"
+            chunk_id = f"{kb_id}_chunk_{i}_{int(time.time())}"
             chunk_ids.append(chunk_id)
             
             metadata = metadatas[i] if metadatas and i < len(metadatas) else {}
-            
-            # 将元数据序列化为 JSON 字符串（参考 cloud-edge-milk-tea-agent）
             metadata_dict = {
                 "chunk_id": chunk_id,
                 "doc_id": metadata.get("doc_id", ""),
@@ -152,22 +179,32 @@ class VectorStore:
                 "position": metadata.get("position"),
                 **metadata.get("metadata", {}),
             }
-            metadata_str = json.dumps(metadata_dict, ensure_ascii=False)
             
-            data.append({
+            # 如果有 ColBERT 向量，由于太大，我们将其转为 bytes 或列表存入 metadata
+            # 或者如果只是演示，我们可以选择不存，或者存入动态字段
+            if colbert_vectors is not None:
+                # 注意：ColBERT 向量很大，存入数据库会显著增加体积
+                # 这里我们将其压缩存入 metadata
+                import numpy as np
+                c_vec = colbert_vectors[i]
+                if isinstance(c_vec, np.ndarray):
+                    metadata_dict["colbert_vec"] = c_vec.tolist()
+
+            item = {
                 "vector": vector,
-                "text": text,  # 存储文本内容
-                "metadata": metadata_str,  # 存储元数据 JSON 字符串
-            })
+                "text": text,
+                "metadata": json.dumps(metadata_dict, ensure_ascii=False),
+            }
+            
+            if use_sparse:
+                item["sparse_vector"] = sparse_vectors[i]
+                
+            data.append(item)
         
-        # 插入到 Milvus（参考 cloud-edge-milk-tea-agent）
         try:
-            self.client.insert(
-                collection_name=collection_name,
-                data=data
-            )
+            self.client.insert(collection_name=collection_name, data=data)
         except Exception as e:
-            raise RuntimeError(f"插入数据到 Milvus 失败: {str(e)}") from e
+            raise RuntimeError(f"插入数据失败: {str(e)}")
         
         return chunk_ids
     
@@ -177,36 +214,61 @@ class VectorStore:
         query_vector: List[float],
         top_k: int = 5,
         filter_condition: Optional[Dict[str, Any]] = None,
+        query_sparse_vector: Optional[Dict[int, float]] = None,
     ) -> List[Tuple[float, ChunkMetadata]]:
         """
-        在指定知识库中搜索相似向量（参考 RAGFlow 的 search 方法和 cloud-edge-milk-tea-agent 的实现）。
-        
-        Args:
-            kb_id: 知识库 ID
-            query_vector: 查询向量
-            top_k: 返回 top-k 个最相似的结果
-            filter_condition: 过滤条件（可选，后续可以扩展）
-        
-        Returns:
-            (相似度分数, ChunkMetadata) 列表，按相似度降序排列
-            注意：Milvus 使用余弦相似度，返回的距离越小越相似
+        在指定知识库中搜索相似向量。支持 Dense 和 Sparse 混合检索。
         """
         collection_name = self._get_collection_name(kb_id)
-        
-        # 检查 collection 是否存在
         if not self.client.has_collection(collection_name):
             return []
         
-        # 执行搜索（参考 cloud-edge-milk-tea-agent）
         try:
+            # 1. 如果没有稀疏向量，执行常规密集向量搜索
+            if query_sparse_vector is None:
+                results = self.client.search(
+                    collection_name=collection_name,
+                    data=[query_vector],
+                    limit=top_k,
+                    output_fields=["text", "metadata"],
+                )
+            else:
+                # 2. 混合搜索 (Hybrid Search)
+                from pymilvus import AnnSearchRequest, RRFRanker
+                
+                # 密集向量请求
+                dense_req = AnnSearchRequest(
+                    data=[query_vector],
+                    anns_field="vector",
+                    param={"metric_type": "COSINE"},
+                    limit=top_k * 2 # 扩大范围以便后续融合
+                )
+                
+                # 稀疏向量请求
+                sparse_req = AnnSearchRequest(
+                    data=[query_sparse_vector],
+                    anns_field="sparse_vector",
+                    param={"metric_type": "IP"},
+                    limit=top_k * 2
+                )
+                
+                # 使用 RRF (Reciprocal Rank Fusion) 进行结果融合
+                results = self.client.hybrid_search(
+                    collection_name=collection_name,
+                    reqs=[dense_req, sparse_req],
+                    ranker=RRFRanker(), # 默认 RRF 排名
+                    limit=top_k,
+                    output_fields=["text", "metadata"]
+                )
+        except Exception as e:
+            # 如果 hybrid_search 报错（可能是某些环境不支持），降级到密集向量搜索
+            print(f"     ⚠️  混合检索执行失败，降级到密集检索: {e}")
             results = self.client.search(
                 collection_name=collection_name,
                 data=[query_vector],
                 limit=top_k,
                 output_fields=["text", "metadata"],
             )
-        except Exception as e:
-            raise RuntimeError(f"Milvus 搜索失败: {str(e)}") from e
         
         # 处理结果（参考 cloud-edge-milk-tea-agent 的格式）
         search_results = []

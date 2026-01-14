@@ -100,26 +100,43 @@ class EmbeddingClient:
         
         return cls(cfg=cfg, client=client, async_client=async_client)
 
-    def embed_texts(self, texts: List[str], verbose: bool = False, batch_size: int = 10) -> List[Vector]:
-        """将一批文本转换为向量"""
+    def embed_texts(
+        self, 
+        texts: List[str], 
+        verbose: bool = False, 
+        batch_size: int = 10,
+        return_sparse: bool = False,
+        return_multi: bool = False
+    ) -> Dict[str, Any]:
+        """将一批文本转换为向量，支持多种类型返回"""
         if not texts:
-            return []
+            return {"dense_vecs": []}
 
         # 1. 本地模式处理
         if self.cfg.mode == "local" and self._local_model:
             if verbose:
-                print(f"     ⏳ 正在使用本地 BGE-M3 进行向量化 (文本数: {len(texts)})...")
+                print(f"     ⏳ 正在使用本地 BGE-M3 进行向量化 (文本数: {len(texts)}, Sparse: {return_sparse}, Multi: {return_multi})...")
             
             start_time = time.time()
-            # BGE-M3 默认只返回 dense_vecs，适合现有的检索逻辑
-            output = self._local_model.encode(texts, return_dense=True)
-            vectors = output['dense_vecs'].tolist()
+            output = self._local_model.encode(
+                texts, 
+                return_dense=True,
+                return_sparse=return_sparse,
+                return_colbert_vecs=return_multi
+            )
+            
+            result = {"dense_vecs": output['dense_vecs'].tolist()}
+            if return_sparse:
+                # 稀疏向量格式转换: [{id: weight}, ...]
+                result["sparse_vecs"] = output['lexical_weights']
+            if return_multi:
+                result["multi_vecs"] = output['colbert_vecs']
             
             if verbose:
                 print(f"     ✅ 本地向量化完成，耗时: {time.time() - start_time:.2f} 秒")
-            return vectors
+            return result
 
-        # 2. API 模式处理 (保留原有逻辑)
+        # 2. API 模式处理 (仅支持密集向量)
         if not self.client:
             raise RuntimeError("客户端未初始化")
         
@@ -153,7 +170,7 @@ class EmbeddingClient:
                 )
                 all_vectors = [item.embedding for item in response.data]
             
-            return all_vectors
+            return {"dense_vecs": all_vectors}
             
         except Exception as e:
             raise RuntimeError(f"Embedding 调用失败: {str(e)}") from e

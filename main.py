@@ -36,6 +36,8 @@ def load_config_from_json(config_path: str) -> List[KnowledgeBaseConfig]:
             source_path=kb["source_path"],
             file_pattern=kb.get("file_pattern", "*.md"),
             top_k=kb.get("top_k", 4),
+            use_sparse=kb.get("use_sparse", False),
+            use_multi_vector=kb.get("use_multi_vector", False),
             use_markdown_header_split=kb.get("use_markdown_header_split", True),
         ))
     

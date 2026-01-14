@@ -53,6 +53,8 @@ class KnowledgeBaseConfig:
     source_path: str  # 知识库源文件路径（如：../HowToCook/dishes）
     file_pattern: str = "*.md"  # 文件匹配模式（默认：所有 .md 文件）
     top_k: int = 4  # 默认检索数量
+    use_sparse: bool = False  # 是否启用稀疏向量检索
+    use_multi_vector: bool = False  # 是否启用多向量检索 (ColBERT)
     use_markdown_header_split: bool = True  # 是否使用 Markdown 标题分割
 
 
