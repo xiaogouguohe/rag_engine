@@ -2,11 +2,10 @@
   "knowledge_bases": [
     {
       "kb_id": "recipes_kb",
-      "source_path": "../HowToCook/dishes",
+      "source_path": "sample_recipes",
       "file_pattern": "*.md",
       "use_markdown_header_split": true,
       "description": "菜谱知识库，包含各种菜谱的 Markdown 文件"
     }
   ]
 }
-

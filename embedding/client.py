@@ -93,6 +93,10 @@ class EmbeddingClient:
                     if verbose:
                         print(f"     ⏳ 批次 {batch_num}/{total_batches}: 处理 {len(batch_texts)} 个文本...")
                     
+                    # 如果不是第一批，稍微等一下，规避 API 的 RPM (每分钟请求数) 限制
+                    if i > 0:
+                        time.sleep(2.0)  # 等待 2 秒
+                    
                     batch_start = time.time()
                     response = self.client.embeddings.create(
                         model=self.cfg.model,

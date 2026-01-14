@@ -1,8 +1,13 @@
 openai>=1.0.0,<2.0.0
 python-dotenv>=1.0.0,<2.0.0
-pymilvus>=2.4.0,<3.0.0
+pymilvus[milvus_lite]>=2.4.0,<3.0.0
+milvus-lite>=2.4.0
 langchain-core>=0.3.0,<1.0.0
 langchain-text-splitters>=0.3.0,<1.0.0
+
+# 本地 Embedding 支持（BGE-M3 等）
+sentence-transformers>=2.2.0
+torch>=2.0.0
 
 # RAGAS 评估框架（可选，用于生成和评估数据集）
 ragas>=0.1.0,<1.0.0
