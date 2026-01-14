@@ -294,11 +294,9 @@ result = engine.ingest_document("document.md")
 # python main.py ingest --kb-id my_kb --file document.md
 ```
 
-### 从配置文件加载知识库（推荐）⭐
+### 从配置文件加载知识库（全局配置）⭐
 
-**方式一：使用 JSON 配置文件（推荐）**
-
-1. 编辑 `knowledge_bases.json` 文件：
+**编辑 `rag_config.json` 文件：**
 
 ```json
 {
@@ -314,15 +312,37 @@ result = engine.ingest_document("document.md")
 }
 ```
 
-2. 运行加载脚本：
+**运行加载指令：**
 
 ```bash
 # 加载所有配置的知识库
-python3 main.py
+python3 main.py load
 
 # 只加载指定的知识库
-python3 main.py --kb-id recipes_kb
+python3 main.py load --kb-id recipes_kb
 ```
+
+### 完整运行流程
+
+1. **向量化加载**：将原始文档转化为向量并存入数据库
+   ```bash
+   python3 main.py load --kb-id recipes_kb
+   ```
+
+2. **交互对话**：进入即时问答模式
+   ```bash
+   python3 main.py chat --kb-id recipes_kb --show-sources
+   ```
+
+3. **单次查询**：
+   ```bash
+   python3 main.py query --kb-id recipes_kb --question "红烧肉怎么做"
+   ```
+
+4. **查看统计**：
+   ```bash
+   python3 main.py stats --kb-id recipes_kb
+   ```
 
 **方式二：使用环境变量**
 

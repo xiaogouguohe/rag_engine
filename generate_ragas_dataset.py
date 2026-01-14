@@ -243,8 +243,8 @@ def generate_ragas_dataset_with_knowledge_graph(
     if source_path:
         source_dir = Path(source_path)
     else:
-        # 方式1：从 knowledge_bases.json 读取
-        kb_json_path = Path("knowledge_bases.json")
+        # 方式1：从 rag_config.json 读取
+        kb_json_path = Path("rag_config.json")
         if kb_json_path.exists():
             try:
                 with open(kb_json_path, "r", encoding="utf-8") as f:
@@ -253,7 +253,7 @@ def generate_ragas_dataset_with_knowledge_graph(
                 if kb_config:
                     source_dir = Path(kb_config["source_path"])
             except Exception as e:
-                print(f"⚠️  读取 knowledge_bases.json 失败: {e}")
+                print(f"⚠️  读取 rag_config.json 失败: {e}")
         
         # 方式2：从环境变量配置读取
         if source_dir is None:
@@ -817,7 +817,7 @@ def generate_ragas_dataset_with_testset_generator(
     else:
         # 从配置文件读取
         try:
-            config_path = Path("knowledge_bases.json")
+            config_path = Path("rag_config.json")
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8") as f:
                     config_data = json.load(f)
@@ -1318,8 +1318,8 @@ def generate_ragas_dataset(
         # 从配置文件读取
         source_dir = None
         
-        # 方式1：从 knowledge_bases.json 读取
-        kb_json_path = Path(project_root) / "knowledge_bases.json"
+        # 方式1：从 rag_config.json 读取
+        kb_json_path = Path(project_root) / "rag_config.json"
         if kb_json_path.exists():
             try:
                 with open(kb_json_path, "r", encoding="utf-8") as f:
@@ -1329,7 +1329,7 @@ def generate_ragas_dataset(
                 if kb_config_dict:
                     source_dir = Path(kb_config_dict["source_path"])
             except Exception as e:
-                print(f"⚠️  读取 knowledge_bases.json 失败: {e}")
+                print(f"⚠️  读取 rag_config.json 失败: {e}")
         
         # 方式2：从环境变量配置读取
         if source_dir is None:
@@ -1346,7 +1346,7 @@ def generate_ragas_dataset(
         if source_dir is None:
             print(f"❌ 未找到知识库配置: {kb_id}")
             print(f"   提示:")
-            print(f"   1. 检查 knowledge_bases.json 文件")
+            print(f"   1. 检查 rag_config.json 文件")
             print(f"   2. 或使用 --source-path 参数指定路径")
             print(f"   3. 或配置环境变量 RAG_KNOWLEDGE_BASES")
             return False

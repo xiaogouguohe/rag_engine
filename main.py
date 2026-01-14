@@ -140,7 +140,7 @@ def main():
     
     # 1. load 命令 - 仅支持通过 JSON 配置文件加载
     load_parser = subparsers.add_parser("load", help="从 JSON 配置文件加载并向量化知识库")
-    load_parser.add_argument("--config", default="knowledge_bases.json", help="配置文件路径")
+    load_parser.add_argument("--config", default="rag_config.json", help="配置文件路径")
     load_parser.add_argument("--kb-id", help="指定要加载的知识库 ID")
     
     # 2. chat 命令 - 交互式对话
