@@ -409,23 +409,24 @@ def generate_ragas_dataset_with_knowledge_graph(
     try:
         app_config = AppConfig.load()
         
-        try:
-            from langchain_openai import ChatOpenAI
-            from ragas.embeddings import OpenAIEmbeddings
-        except ImportError:
-            print("❌ 需要安装 langchain-openai")
-            print("   请运行: pip install langchain-openai")
-            return False
+        # 使用 RAGAS 原生的 llm_factory 创建 LLM（不依赖 langchain-openai）
+        from openai import OpenAI
+        from ragas.llms import llm_factory
         
-        # 创建 langchain LLM
-        generator_llm = ChatOpenAI(
-            model=app_config.llm.model,
+        openai_client = OpenAI(
             api_key=app_config.llm.api_key,
             base_url=app_config.llm.base_url,
-            temperature=0.1,
-            timeout=120.0,
-            max_retries=3,
         )
+        
+        # 设置环境变量，因为 llm_factory 不直接接受 api_key
+        import os
+        os.environ["OPENAI_API_KEY"] = app_config.llm.api_key
+        
+        generator_llm = llm_factory(
+            model=app_config.llm.model,
+            base_url=app_config.llm.base_url,
+        )
+        print("✅ LLM 初始化成功 (使用 llm_factory)")
         
         # 创建 Embeddings
         try:
@@ -490,8 +491,7 @@ def generate_ragas_dataset_with_knowledge_graph(
                 
                 # 5.3 创建提取器
                 print("  步骤 2: 创建提取器...")
-                from ragas.llms import LangchainLLMWrapper
-                ragas_llm_for_extractors = LangchainLLMWrapper(generator_llm)
+                ragas_llm_for_extractors = generator_llm
                 
                 ner_extractor = NERExtractor(llm=ragas_llm_for_extractors)
                 keyphrase_extractor = KeyphrasesExtractor(llm=ragas_llm_for_extractors)
@@ -505,24 +505,34 @@ def generate_ragas_dataset_with_knowledge_graph(
                 @dataclass
                 class EntityFormatFixer(BaseGraphTransformation):
                     async def transform(self, kg: KnowledgeGraph) -> t.Any:
-                        print("    [补丁] 正在修复实体格式并合并所有类别...")
+                        print("    [补丁] 正在修复实体格式并确保 Pydantic 类型兼容...")
+                        all_entities_global = set()
                         for i, node in enumerate(kg.nodes):
                             if "entities" in node.properties:
                                 entities = node.properties["entities"]
-                                # 如果是 list，直接包装
+                                flat_entities = []
+                                
+                                # 处理各种可能的实体格式
                                 if isinstance(entities, list):
-                                    node.properties["entities"] = {"all": entities}
-                                # 如果是 dict，把所有类别的实体合并到一个 "all" 列表里
+                                    flat_entities = [str(x) for x in entities]
                                 elif isinstance(entities, dict):
-                                    all_list = []
                                     for vals in entities.values():
                                         if isinstance(vals, list):
-                                            all_list.extend(vals)
-                                    node.properties["entities"] = {"all": list(set(all_list))}
+                                            flat_entities.extend([str(x) for x in vals])
                                 
-                                # 调试打印前 2 个节点的内容
+                                flat_entities = list(set(flat_entities))
+                                all_entities_global.update(flat_entities)
+                                
+                                # 核心修复：JaccardBuilder 喜欢 {"all": list}，但 TestsetGenerator 喜欢 list
+                                # 我们为两者都准备好数据
+                                node.properties["entities_dict"] = {"all": flat_entities} # 供关系构建器用
+                                node.properties["entities"] = flat_entities # 供生成器用 (Pydantic 校验)
+                                
                                 if i < 2:
-                                    print(f"      节点 {i} 提取到的部分实体: {node.properties['entities']['all'][:5]}...")
+                                    print(f"      节点 {i} 提取到的部分实体: {flat_entities[:5]}...")
+                        
+                        # 注入全局主题列表，防止生成阶段再次报错
+                        kg.properties["themes"] = list(all_entities_global)
                         return kg
                     
                     def generate_execution_plan(self, kg: KnowledgeGraph) -> t.Sequence[t.Coroutine]:
@@ -535,9 +545,9 @@ def generate_ragas_dataset_with_knowledge_graph(
                 print("  步骤 3: 创建关系构建器...")
                 from ragas.testset.transforms.relationship_builders.traditional import JaccardSimilarityBuilder
                 
-                # 使用通用的 "all" 键，并显著降低阈值 (threshold)
+                # 使用通用的 "entities_dict" 键，并显著降低阈值 (threshold)
                 rel_builder = JaccardSimilarityBuilder(
-                    property_name="entities",
+                    property_name="entities_dict",
                     key_name="all",
                     new_property_name="entity_jaccard_similarity",
                     threshold=0.01 # 极其宽容，只要有重合就连线
@@ -603,7 +613,7 @@ def generate_ragas_dataset_with_knowledge_graph(
         try:
             if knowledge_graph is not None:
                 # 使用知识图谱创建 TestsetGenerator
-                generator = TestsetGenerator.from_langchain(
+                generator = TestsetGenerator(
                     llm=generator_llm,
                     embedding_model=embeddings,
                     knowledge_graph=knowledge_graph,
@@ -611,7 +621,7 @@ def generate_ragas_dataset_with_knowledge_graph(
                 print("✅ TestsetGenerator 初始化成功（带知识图谱）")
             else:
                 # 不使用知识图谱
-                generator = TestsetGenerator.from_langchain(
+                generator = TestsetGenerator(
                     llm=generator_llm,
                     embedding_model=embeddings,
                 )
@@ -933,26 +943,24 @@ def generate_ragas_dataset_with_testset_generator(
     try:
         app_config = AppConfig.load()
         
-        # 将我们的配置适配为 RAGAS 需要的 langchain 对象
-        # RAGAS 需要 langchain_openai.ChatOpenAI 和 ragas.embeddings
-        try:
-            from langchain_openai import ChatOpenAI
-            from ragas.embeddings import OpenAIEmbeddings
-        except ImportError:
-            print("❌ 需要安装 langchain-openai")
-            print("   请运行: pip install langchain-openai")
-            return False
+        # 使用 RAGAS 原生的 llm_factory 创建 LLM（不依赖 langchain-openai）
+        from openai import OpenAI
+        from ragas.llms import llm_factory
         
-        # 创建 langchain LLM（从我们的配置读取）
-        # 增加超时设置，避免连接问题
-        generator_llm = ChatOpenAI(
-            model=app_config.llm.model,  # 注意：属性名是 model，不是 model_name
+        openai_client = OpenAI(
             api_key=app_config.llm.api_key,
             base_url=app_config.llm.base_url,
-            temperature=0.1,
-            timeout=120.0,  # 增加超时时间到 120 秒（RAGAS 可能需要较长时间）
-            max_retries=3,  # 增加重试次数
         )
+        
+        # 设置环境变量，因为 llm_factory 不直接接受 api_key
+        import os
+        os.environ["OPENAI_API_KEY"] = app_config.llm.api_key
+        
+        generator_llm = llm_factory(
+            model=app_config.llm.model,
+            base_url=app_config.llm.base_url,
+        )
+        print("✅ LLM 初始化成功 (使用 llm_factory)")
         
         # 创建 Embeddings（从我们的配置读取）
         if app_config.embedding.mode == "local":
@@ -1007,10 +1015,10 @@ def generate_ragas_dataset_with_testset_generator(
                     return False
         
         # 创建 TestsetGenerator
-        # RAGAS 0.4.2 使用 from_langchain 创建，参数名是 llm 和 embedding_model
+        # RAGAS 0.4.2 直接通过构造函数创建
         try:
-            generator = TestsetGenerator.from_langchain(
-                llm=generator_llm,  # 注意：参数名是 llm，不是 generator_llm
+            generator = TestsetGenerator(
+                llm=generator_llm,
                 embedding_model=embeddings,
             )
         except Exception as e:
@@ -1770,10 +1778,7 @@ def evaluate_with_ragas(
         # 注意：增加 max_tokens 以避免输出被截断（faithfulness 需要生成较长的输出）
         ragas_llm = llm_factory(
             model=app_config.llm.model,
-            provider="openai",
-            client=openai_client,
-            temperature=0.1,
-            max_tokens=4096,  # 增加 max_tokens，避免输出被截断
+            base_url=app_config.llm.base_url,
         )
         print("✅ LLM 初始化成功（使用 llm_factory，不依赖 LangChain，max_tokens=4096）")
         
