@@ -8,6 +8,7 @@
       "use_sparse": true,
       "use_multi_vector": true,
       "use_query_rewrite": true,
+      "use_context_expansion": true,
       "use_markdown_header_split": true,
       "description": "菜谱知识库，包含各种菜谱的 Markdown 文件"
     }

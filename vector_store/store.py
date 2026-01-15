@@ -340,7 +340,44 @@ class VectorStore:
         if kb_id in self._collections:
             del self._collections[kb_id]
     
-    def get_all_chunks(self, kb_id: str, limit: Optional[int] = None) -> List[ChunkMetadata]:
+    def get_chunks_by_parent_id(self, kb_id: str, parent_id: str) -> List[ChunkMetadata]:
+        """
+        根据父文档 ID 取回该文档的所有切片，并按 position 排序。
+        这是实现“全文检索/上下文扩展”的关键。
+        """
+        collection_name = self._get_collection_name(kb_id)
+        if not self.client.has_collection(collection_name):
+            return []
+        
+        try:
+            # 利用我们之前建立的标量索引进行高速过滤
+            results = self.client.query(
+                collection_name=collection_name,
+                filter=f'parent_id == "{parent_id}"',
+                output_fields=["text", "metadata", "parent_id", "kb_id"],
+                limit=100 # 假设一个文档不会超过 100 个切片
+            )
+            
+            chunks = []
+            for res in results:
+                metadata_dict = json.loads(res.get("metadata", "{}"))
+                chunks.append(ChunkMetadata(
+                    chunk_id=metadata_dict.get("chunk_id", ""),
+                    parent_id=res.get("parent_id", ""),
+                    kb_id=res.get("kb_id", kb_id),
+                    text=res.get("text", ""),
+                    page_num=metadata_dict.get("page_num"),
+                    position=metadata_dict.get("position"),
+                    metadata={k: v for k, v in metadata_dict.items() 
+                             if k not in ["chunk_id", "parent_id", "kb_id", "page_num", "position"]},
+                ))
+            
+            # 严格按 position 排序，还原文档顺序
+            chunks.sort(key=lambda x: x.position if x.position is not None else 0)
+            return chunks
+        except Exception as e:
+            print(f"     ⚠️ 取回父文档切片失败: {e}")
+            return []
         """
         获取知识库中的所有 chunks（用于测试集生成等场景）。
         

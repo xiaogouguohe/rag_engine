@@ -273,7 +273,7 @@ class RAGEngine:
         history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
-        问答流程：支持密集、稀疏、多向量检索，以及可选的查询改写。
+        问答流程：支持密集、稀疏、多向量检索，以及可选的查询改写和上下文扩展。
         """
         if not question.strip():
             raise ValueError("问题不能为空")
@@ -283,6 +283,7 @@ class RAGEngine:
         use_sparse = self.kb_config.use_sparse if self.kb_config else False
         use_multi = self.kb_config.use_multi_vector if self.kb_config else False
         use_rewrite = self.kb_config.use_query_rewrite if self.kb_config else False
+        use_expansion = self.kb_config.use_context_expansion if self.kb_config else False
         
         # 1. 查询改写 (如果启用且有历史)
         search_query = question
@@ -318,7 +319,6 @@ class RAGEngine:
             candidate_texts = [res[1].text for res in search_results]
             
             # 现场计算候选片段的多向量 (Online Encoding)
-            # 注意：这里只计算几十个片段，速度会很快
             candidate_emb = self.embedding_client.embed_texts(
                 candidate_texts, 
                 return_sparse=False, 
@@ -332,7 +332,6 @@ class RAGEngine:
                     doc_multi = candidate_multi_vecs[i]
                     
                     # 计算 ColBERT MaxSim 分数
-                    # query_multi: [q_len, dim], doc_multi: [d_len, dim]
                     sim_matrix = np.matmul(query_multi, doc_multi.T)
                     max_sim_score = np.mean(np.max(sim_matrix, axis=1))
                     
@@ -346,7 +345,6 @@ class RAGEngine:
             else:
                 search_results = search_results[:final_top_k]
         else:
-            # 如果没开精排，直接取 top_k
             search_results = search_results[:final_top_k]
         
         # 4. 过滤低相似度的结果
@@ -362,23 +360,40 @@ class RAGEngine:
                 "query": question,
             }
         
-        # 4. 构建上下文
+        # 5. 构建上下文 (在这里处理是否扩展全文)
         context_chunks = []
-        for score, metadata in filtered_results:
-            context_chunks.append({
-                "text": metadata.text,
-                "score": score,
-                "parent_id": metadata.parent_id, # 修正属性名
-                "chunk_id": metadata.chunk_id,
-            })
         
-        # 5. 拼接上下文和问题
+        if use_expansion:
+            # 高级模式：获取最相关片段所属的【完整文档】
+            # 我们只针对得分最高的那个 parent_id 进行扩展，避免上下文过长
+            best_parent_id = filtered_results[0][1].parent_id
+            print(f"     📑 正在执行上下文扩展：取回父文档 [{best_parent_id}] 的全部内容...")
+            
+            full_docs = self.vector_store.get_chunks_by_parent_id(self.kb_id, best_parent_id)
+            for chunk in full_docs:
+                context_chunks.append({
+                    "text": chunk.text,
+                    "score": 1.0, # 扩展内容统一标记为相关
+                    "parent_id": chunk.parent_id,
+                    "chunk_id": chunk.chunk_id,
+                })
+        else:
+            # 基础模式：仅使用检索到的片段
+            for score, metadata in filtered_results:
+                context_chunks.append({
+                    "text": metadata.text,
+                    "score": score,
+                    "parent_id": metadata.parent_id,
+                    "chunk_id": metadata.chunk_id,
+                })
+        
+        # 6. 拼接上下文和问题
         context = "\n\n".join([
             f"[文档片段 {i+1}]\n{chunk['text']}"
             for i, chunk in enumerate(context_chunks)
         ])
         
-        # 6. 构建提示词
+        # 7. 构建提示词
         if system_prompt is None:
             system_prompt = """你是一个专业的 AI 助手。请根据提供的文档片段回答问题。
 如果文档中没有相关信息，请诚实地说不知道。"""
