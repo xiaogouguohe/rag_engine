@@ -12,11 +12,11 @@ RAGAS (Retrieval-Augmented Generation Assessment) 是一个专门用于评估 RA
 3. 合成包含问题、参考答案和参考上下文的测试集
 
 使用方法：
-    # 使用推荐的新方法生成测试集（必须指定 --source-path）
-    python scripts/data_gen/generate_ragas_dataset.py --kb-id recipes_kb --source-path ./sample_recipes --use-testset-generator
+    # 从指定路径生成测试集（推荐）
+    python scripts/data_gen/generate_ragas_dataset.py --kb-id recipes_kb --source-path ./sample_recipes
 
-    # 使用知识图谱生成
-    python scripts/data_gen/generate_ragas_dataset.py --kb-id recipes_kb --source-path ./sample_recipes --use-testset-generator --use-kg
+    # 使用知识图谱生成更高质量的多跳问题
+    python scripts/data_gen/generate_ragas_dataset.py --kb-id recipes_kb --source-path ./sample_recipes --use-kg
 """
 
 import sys
@@ -268,14 +268,9 @@ def main():
     parser.add_argument("--output", default="ragas_dataset.json", help="输出 JSON 文件路径")
     parser.add_argument("--max-docs", type=int, default=5, help="最多处理的文档数")
     parser.add_argument("--max-questions-per-doc", type=int, default=3, help="每个文档生成的问题数")
-    parser.add_argument("--use-testset-generator", action="store_true", help="使用 RAGAS TestsetGenerator (推荐)")
-    parser.add_argument("--use-kg", action="store_true", help="使用知识图谱模式 (需开启 --use-testset-generator)")
+    parser.add_argument("--use-kg", action="store_true", help="使用知识图谱模式")
     
     args = parser.parse_args()
-    
-    # 强制要求必须是 TestsetGenerator 模式（既然是为您定制的逻辑，简化分支）
-    if not args.use_testset_generator:
-        print("💡 提示: 建议开启 --use-testset-generator 以获得更好的生成效果")
     
     success = generate_ragas_dataset_with_knowledge_graph(
         kb_id=args.kb_id,
