@@ -223,6 +223,7 @@ def evaluate_retrieval(
             query_result = engine.query(
                 question=question,
                 top_k=top_k,
+                generate_answer=eval_response,
             )
             
             # 2. 检索指标计算

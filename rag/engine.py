@@ -271,6 +271,7 @@ class RAGEngine:
         similarity_threshold: float = 0.0,
         system_prompt: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
+        generate_answer: bool = True,
     ) -> Dict[str, Any]:
         """
         问答流程：支持密集、稀疏、多向量检索，以及可选的查询改写和上下文扩展。
@@ -355,7 +356,7 @@ class RAGEngine:
         
         if not filtered_results:
             return {
-                "answer": "抱歉，没有找到相关信息。",
+                "answer": "抱歉，没有找到相关信息。" if generate_answer else "",
                 "sources": [],
                 "query": question,
             }
@@ -387,6 +388,15 @@ class RAGEngine:
                     "chunk_id": metadata.chunk_id,
                 })
         
+        # 如果不生成回答，直接返回检索结果
+        if not generate_answer:
+            return {
+                "answer": "",
+                "sources": context_chunks,
+                "chunks": context_chunks,
+                "query": question,
+            }
+
         # 6. 拼接上下文和问题
         context = "\n\n".join([
             f"[文档片段 {i+1}]\n{chunk['text']}"
