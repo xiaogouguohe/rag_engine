@@ -1,18 +1,20 @@
 from pymilvus import MilvusClient
 import json
 import os
+import sys
+from pathlib import Path
+
+# 添加项目根目录到路径
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 # 适配不同的运行路径（优先检查当前目录下的 data 目录）
-db_path = "data/indices/milvus_lite.db"
-if not os.path.exists(db_path):
-    db_path = "rag_engine/data/indices/milvus_lite.db"
-
-if not os.path.exists(db_path):
-    print(f"❌ 找不到数据库文件，请确认路径是否正确。")
-    print(f"   尝试过的路径: data/indices/milvus_lite.db 或 rag_engine/data/indices/milvus_lite.db")
+db_path = project_root / "data/indices/milvus_lite.db"
+if not db_path.exists():
+    print(f"❌ 找不到数据库文件，请确认路径是否正确: {db_path}")
     exit(1)
 
-client = MilvusClient(uri=db_path)
+client = MilvusClient(uri=str(db_path))
 
 collections = client.list_collections()
 print(f"当前集合列表: {collections}")

@@ -55,17 +55,17 @@ class EmbeddingClient:
         """从配置创建客户端"""
         cfg = app_cfg.embedding
         
-                if cfg.mode == "local":
-                    print(f"     🚀 正在初始化本地 Embedding 模型: {cfg.model}...")
-                    try:
-                        # 1. 优先设置离线环境变量和 Mac 显存优化
-                        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-                        os.environ["HF_HUB_OFFLINE"] = "1"  # 强制离线模式
-                        
-                        # 优化 Mac 的 MPS 显存管理
-                        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-                        
-                        from FlagEmbedding import BGEM3FlagModel
+        if cfg.mode == "local":
+            print(f"     🚀 正在初始化本地 Embedding 模型: {cfg.model}...")
+            try:
+                # 1. 优先设置离线环境变量和 Mac 显存优化
+                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+                os.environ["HF_HUB_OFFLINE"] = "1"  # 强制离线模式
+                
+                # 优化 Mac 的 MPS 显存管理
+                os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+                
+                from FlagEmbedding import BGEM3FlagModel
                 from huggingface_hub import snapshot_download
                 
                 # 2. 获取本地缓存的绝对路径（不再联网，直接查本地）
@@ -79,10 +79,10 @@ class EmbeddingClient:
                     # 如果强制离线查找失败，尝试正常路径（可能由于 snapshots 软连接问题）
                     local_model_path = cfg.model
 
-                   # 3. 初始化本地模型
-                   # 如果显存依然紧张，可以考虑增加 devices=['cpu'] 强制走 CPU
-                   model = BGEM3FlagModel(local_model_path, use_fp16=True) # 开启 fp16 节省显存
-                   print(f"     ✅ 本地模型加载成功 (路径: {local_model_path})")
+                # 3. 初始化本地模型
+                # 如果显存依然紧张，可以考虑增加 devices=['cpu'] 强制走 CPU
+                model = BGEM3FlagModel(local_model_path, use_fp16=True) # 开启 fp16 节省显存
+                print(f"     ✅ 本地模型加载成功 (路径: {local_model_path})")
                 return cls(cfg=cfg, _local_model=model)
             except ImportError:
                 raise RuntimeError("未安装 FlagEmbedding 库。请执行: pip install FlagEmbedding")
